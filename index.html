@@ -144,7 +144,27 @@ async function cloudVisit(clientId,visitado){
 }
 async function cloudAddProduct(product){
   if(!cloudConfigured())return false;
-  try{await cloudFetch('productos','',{method:'POST',body:JSON.stringify({id:product.id,nombre:product.nombre,marca:product.marca,codigo:product.codigo,peso:product.pesoBase===''?null:Number(product.pesoBase),})});return true;}catch(e){console.error(e);return false;}
+  try{
+    const rows=await cloudFetch('productos','select=id,nombre,marca,codigo,peso',{method:'POST',headers:{'Prefer':'return=representation'},body:JSON.stringify({id:product.id,nombre:product.nombre,marca:product.marca,codigo:product.codigo,peso:product.pesoBase===''?null:Number(product.pesoBase)})});
+    return Array.isArray(rows)&&rows.length?rows[0]:product;
+  }catch(e){console.error('BIPA producto global:',e);return false;}
+}
+async function cloudRefreshCatalog(){
+  if(!cloudConfigured())return false;
+  try{
+    const dbProducts=await cloudFetch('productos','select=id,nombre,marca,codigo,peso&order=id.asc');
+    const oldCatalog=catalog.slice();
+    const merged=[];
+    for(const p of (dbProducts||[])){
+      const old=oldCatalog.find(x=>String(x.dbId||x.id)===String(p.id)||String(x.codigo||'')===String(p.codigo||''));
+      merged.push({id:old?.id||String(p.id),dbId:String(p.id),nombre:p.nombre||old?.nombre||'',marca:p.marca||old?.marca||'',codigo:p.codigo||old?.codigo||String(p.id),pesoBase:p.peso??old?.pesoBase??'',precioBase:old?.precioBase??0});
+    }
+    // Nunca eliminamos un producto local que todavía esté pendiente de sincronización.
+    for(const p of oldCatalog){if(!merged.some(x=>String(x.dbId||x.id)===String(p.dbId||p.id)||String(x.codigo)===String(p.codigo))){merged.push(p);}}
+    catalog=merged;
+    save(STORAGE.catalog,catalog);
+    return true;
+  }catch(e){console.error('BIPA catálogo global:',e);return false;}
 }
 async function cloudEditProduct(product){
   if(!cloudConfigured())return false;
@@ -213,7 +233,54 @@ function newProductModal(){return `<div class="fixed inset-0 z-50 bg-slate-950/6
 
 function editProduct(id){const p=productById(id);if(!p)return;const name=prompt('Nuevo nombre del producto:',p.nombre);if(name===null||!name.trim())return;const idx=catalog.findIndex(x=>x.id===id);if(idx>=0){catalog[idx].nombre=name.trim();save(STORAGE.catalog,catalog);cloudEditProduct(catalog[idx]);}toast('Producto actualizado para todos los clientes');render();}
 function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)){selectedProducts[state.selected.id].push(id);const p=productById(id);if(p&&p.pesoBase!==''&&p.pesoBase!=null){weights[state.selected.id]=weights[state.selected.id]||{};if(weights[state.selected.id][id]===undefined)weights[state.selected.id][id]=Number(p.pesoBase);save(STORAGE.weights,weights);cloudWeight(state.selected.id,id,weights[state.selected.id][id]);}save(STORAGE.selectedProducts,selectedProducts);cloudSelected(state.selected.id,id);}state.catalogOpen=false;state.productSearch='';toast('Producto añadido al cliente');render();}
-async function createNewProduct(){const name=$('#newProductName')?.value.trim();const marca=$('#newProductBrand')?.value.trim();const peso=$('#newProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const id='PROD-'+Date.now();const p={id,nombre:name,marca,codigo:id,pesoBase:peso===''?'':Number(peso),precioBase:0};catalog.push(p);save(STORAGE.catalog,catalog);const ok=await cloudCatalog(p);if(!ok){catalog=catalog.filter(x=>x.id!==id);save(STORAGE.catalog,catalog);toast('No se pudo crear el producto en Supabase');return;}selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];selectedProducts[state.selected.id].push(id);save(STORAGE.selectedProducts,selectedProducts);await cloudSelected(state.selected.id,id);if(peso!==''){weights[state.selected.id]=weights[state.selected.id]||{};weights[state.selected.id][id]=Number(peso);save(STORAGE.weights,weights);await cloudWeight(state.selected.id,id,Number(peso));}state.newProductOpen=false;toast('Producto creado y disponible para todos los clientes');render();}
+async function createNewProduct(){
+  const name=$('#newProductName')?.value.trim();
+  const marca=$('#newProductBrand')?.value.trim();
+  const peso=$('#newProductWeight')?.value.trim();
+  if(!name||!marca){toast('Completa nombre y marca');return;}
+  const id='PROD-'+Date.now()+'-'+Math.random().toString(36).slice(2,7);
+  const p={id,nombre:name,marca,codigo:id,pesoBase:peso===''?'':Number(peso),precioBase:0};
+  catalog.push(p);
+  save(STORAGE.catalog,catalog);
+
+  // 1) Se crea en el catálogo GLOBAL de Supabase.
+  const created=await cloudCatalog(p);
+  if(!created){
+    catalog=catalog.filter(x=>x.id!==id);
+    save(STORAGE.catalog,catalog);
+    toast('No se pudo crear el producto en Supabase');
+    return;
+  }
+  if(created.id){p.dbId=String(created.id);p.id=String(created.id);p.codigo=created.codigo||p.codigo;}
+
+  // Sustituye el registro temporal por el registro definitivo devuelto por Supabase.
+  catalog=catalog.filter(x=>x.id!==id);
+  catalog.push(p);
+  save(STORAGE.catalog,catalog);
+
+  // 2) Lo asociamos al cliente actual. El producto sigue siendo GLOBAL;
+  //    esta relación solamente indica que este cliente lo está trabajando.
+  const localPid=p.id;
+  selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];
+  if(!selectedProducts[state.selected.id].includes(localPid))selectedProducts[state.selected.id].push(localPid);
+  save(STORAGE.selectedProducts,selectedProducts);
+  await cloudSelected(state.selected.id,localPid);
+
+  if(peso!==''){
+    weights[state.selected.id]=weights[state.selected.id]||{};
+    weights[state.selected.id][localPid]=Number(peso);
+    save(STORAGE.weights,weights);
+    await cloudWeight(state.selected.id,localPid,Number(peso));
+  }
+
+  // 3) Volvemos a consultar el catálogo GLOBAL. Así queda disponible
+  //    inmediatamente en "Añadir radar" para este y todos los demás clientes.
+  await cloudRefreshCatalog();
+  state.newProductOpen=false;
+  state.catalogOpen=false;
+  toast('Producto creado en el catálogo global y disponible para todos los clientes');
+  render();
+}
 function removeProductFromClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=(selectedProducts[state.selected.id]||[]).filter(x=>x!==id);save(STORAGE.selectedProducts,selectedProducts);cloudUnselected(state.selected.id,id);toast('Producto quitado de este cliente');render();}
 function render(){const root=$('#app');root.innerHTML=state.view==='home'?home():clientView(state.selected);bind();}
 function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;const s=$('#search');if(s){s.oninput=e=>{state.search=e.target.value;render();requestAnimationFrame(()=>{const input=$('#search');if(input){input.focus();input.setSelectionRange(state.search.length,state.search.length);}})}}const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('.statusBtn').forEach(b=>b.onclick=async()=>{
@@ -223,7 +290,7 @@ function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElem
   const ok=await cloudVisit(cid,next);
   if(ok)toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');
   else{visits[cid]=previous;save(STORAGE.visits,visits);toast('ERROR: no se pudo guardar la visita en Supabase');render();}
-});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=()=>{prices[state.selected.id]=prices[state.selected.id]||{};weights[state.selected.id]=weights[state.selected.id]||{};document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val)});document.querySelectorAll('[data-weight]').forEach(i=>{const val=i.value.trim();if(val==='')delete weights[state.selected.id][i.dataset.weight];else weights[state.selected.id][i.dataset.weight]=Number(val)});save(STORAGE.prices,prices);save(STORAGE.weights,weights);Object.entries(prices[state.selected.id]||{}).forEach(([pid,val])=>cloudPrice(state.selected.id,pid,val));Object.entries(weights[state.selected.id]||{}).forEach(([pid,val])=>cloudWeight(state.selected.id,pid,val));toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=()=>{state.catalogOpen=true;state.newProductOpen=false;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=false;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render()};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};}
+});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=()=>{prices[state.selected.id]=prices[state.selected.id]||{};weights[state.selected.id]=weights[state.selected.id]||{};document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val)});document.querySelectorAll('[data-weight]').forEach(i=>{const val=i.value.trim();if(val==='')delete weights[state.selected.id][i.dataset.weight];else weights[state.selected.id][i.dataset.weight]=Number(val)});save(STORAGE.prices,prices);save(STORAGE.weights,weights);Object.entries(prices[state.selected.id]||{}).forEach(([pid,val])=>cloudPrice(state.selected.id,pid,val));Object.entries(weights[state.selected.id]||{}).forEach(([pid,val])=>cloudWeight(state.selected.id,pid,val));toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{await cloudRefreshCatalog();state.catalogOpen=true;state.newProductOpen=false;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=false;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render()};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};}
 
 document.addEventListener('click',e=>{const card=e.target.closest('[data-client]');if(card){e.preventDefault();const cliente=CLIENTES.find(c=>String(c.id)===String(card.dataset.client));if(cliente){state.selected=cliente;state.view='client';state.productSearch='';state.catalogOpen=false;state.newProductOpen=false;render();}}});
 

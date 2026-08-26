@@ -35,6 +35,21 @@ const cloudHeaders=()=>({
   Prefer:'return=representation'
 });
 function cloudConfigured(){return !!(CLOUD.enabled&&CLOUD.supabaseUrl&&CLOUD.supabaseAnonKey);}
+const clientDbIds=new Map();
+const clientLocalIds=new Map();
+function normText(v){return String(v??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toUpperCase();}
+function clientKey(c){return [normText(c.nombre),normText(c.zona),normText(c.estadoGeografico||c.estado)].join('¦');}
+function dbClientId(localId){return clientDbIds.get(String(localId))||localId;}
+function localClientId(dbId){return clientLocalIds.get(String(dbId))||dbId;}
+async function loadClientIdentityMap(){
+  const dbClients=await cloudFetch('clientes','select=id,nombre,zona,estado&order=id.asc');
+  const buckets=new Map();
+  for(const d of (dbClients||[])){const k=clientKey(d);if(!buckets.has(k))buckets.set(k,[]);buckets.get(k).push(String(d.id));}
+  let matched=0;
+  for(const c of CLIENTES){const k=clientKey(c);const bucket=buckets.get(k)||[];const dbid=bucket.shift();if(dbid){clientDbIds.set(String(c.id),dbid);clientLocalIds.set(dbid,String(c.id));matched++;}}
+  console.info('BIPA: clientes vinculados',matched,'de',CLIENTES.length);
+  return matched;
+}
 async function cloudFetch(table,query='',options={}){
   if(!cloudConfigured())return null;
   const r=await fetch(CLOUD.apiBase+'/'+table+(query?('?'+query):''),{...options,headers:{...cloudHeaders(),...(options.headers||{})}});
@@ -57,6 +72,7 @@ function migrateMapProductIds(map, mapper){
 async function cloudLoad(){
   if(!cloudConfigured())return;
   try{
+    await loadClientIdentityMap();
     const [dbProducts,dbLinks,dbVisits]=await Promise.all([
       cloudFetch('productos','select=id,nombre,marca,codigo,peso&order=id.asc'),
       cloudFetch('cliente_productos','select=cliente_id,producto_id,precio,peso'),
@@ -89,12 +105,14 @@ async function cloudLoad(){
 
     for(const r of (dbLinks||[])){
       const pid=localProductIdFromDb(String(r.producto_id));
-      selectedProducts[r.cliente_id]=selectedProducts[r.cliente_id]||[];
-      if(!selectedProducts[r.cliente_id].includes(pid))selectedProducts[r.cliente_id].push(pid);
-      prices[r.cliente_id]=prices[r.cliente_id]||{}; if(r.precio!==null&&r.precio!==undefined)prices[r.cliente_id][pid]=Number(r.precio);
-      weights[r.cliente_id]=weights[r.cliente_id]||{}; if(r.peso!==null&&r.peso!==undefined)weights[r.cliente_id][pid]=Number(r.peso);
+      const cid=localClientId(r.cliente_id);
+      if(!CLIENTES.some(c=>String(c.id)===String(cid)))continue;
+      selectedProducts[cid]=selectedProducts[cid]||[];
+      if(!selectedProducts[cid].includes(pid))selectedProducts[cid].push(pid);
+      prices[cid]=prices[cid]||{}; if(r.precio!==null&&r.precio!==undefined)prices[cid][pid]=Number(r.precio);
+      weights[cid]=weights[cid]||{}; if(r.peso!==null&&r.peso!==undefined)weights[cid][pid]=Number(r.peso);
     }
-    for(const r of (dbVisits||[]))visits[r.cliente_id]=r.visitado?'Visitado':'Pendiente';
+    for(const r of (dbVisits||[])){const cid=localClientId(r.cliente_id);if(CLIENTES.some(c=>String(c.id)===String(cid)))visits[cid]=r.visitado?'Visitado':'Pendiente';}
 
     save(STORAGE.catalog,catalog);save(STORAGE.prices,prices);save(STORAGE.weights,weights);save(STORAGE.visits,visits);save(STORAGE.selectedProducts,selectedProducts);
     cloudReady=true;
@@ -104,23 +122,25 @@ async function cloudLoad(){
 async function cloudSaveClientProduct(clientId,productId,price,weight){
   if(!cloudConfigured())return false;
   const dbId=dbProductId(productId);
+  const dbClient=dbClientId(clientId);
   try{
-    const existing=await cloudFetch('cliente_productos',`select=cliente_id,producto_id&cliente_id=eq.${encodeURIComponent(clientId)}&producto_id=eq.${encodeURIComponent(dbId)}&limit=1`);
-    const body={cliente_id:clientId,producto_id:dbId,precio:price===undefined||price===''?null:Number(price),peso:weight===undefined||weight===''?null:Number(weight),};
-    if(existing?.length){await cloudFetch('cliente_productos',`cliente_id=eq.${encodeURIComponent(clientId)}&producto_id=eq.${encodeURIComponent(dbId)}`,{method:'PATCH',body:JSON.stringify(body)});}
+    const existing=await cloudFetch('cliente_productos',`select=cliente_id,producto_id&cliente_id=eq.${encodeURIComponent(dbClient)}&producto_id=eq.${encodeURIComponent(dbId)}&limit=1`);
+    const body={cliente_id:dbClient,producto_id:dbId,precio:price===undefined||price===''?null:Number(price),peso:weight===undefined||weight===''?null:Number(weight),};
+    if(existing?.length){await cloudFetch('cliente_productos',`cliente_id=eq.${encodeURIComponent(dbClient)}&producto_id=eq.${encodeURIComponent(dbId)}`,{method:'PATCH',body:JSON.stringify(body)});}
     else await cloudFetch('cliente_productos','',{method:'POST',body:JSON.stringify(body)});
     return true;
   }catch(e){console.error(e);return false;}
 }
 async function cloudVisit(clientId,visitado){
   if(!cloudConfigured())return false;
+  const dbClient=dbClientId(clientId);
   try{
-    const body={cliente_id:clientId,visitado:visitado==='Visitado',};
-    const existing=await cloudFetch('visitas',`select=cliente_id&cliente_id=eq.${encodeURIComponent(clientId)}&limit=1`);
-    if(existing?.length)await cloudFetch('visitas',`cliente_id=eq.${encodeURIComponent(clientId)}`,{method:'PATCH',body:JSON.stringify(body)});
+    const body={cliente_id:dbClient,visitado:visitado==='Visitado'};
+    const existing=await cloudFetch('visitas',`select=cliente_id&cliente_id=eq.${encodeURIComponent(dbClient)}&limit=1`);
+    if(existing?.length)await cloudFetch('visitas',`cliente_id=eq.${encodeURIComponent(dbClient)}`,{method:'PATCH',body:JSON.stringify(body)});
     else await cloudFetch('visitas','',{method:'POST',body:JSON.stringify(body)});
     return true;
-  }catch(e){console.error(e);return false;}
+  }catch(e){console.error('BIPA visita:',e);return false;}
 }
 async function cloudAddProduct(product){
   if(!cloudConfigured())return false;
@@ -132,7 +152,7 @@ async function cloudEditProduct(product){
 }
 async function cloudRemoveClientProduct(clientId,productId){
   if(!cloudConfigured())return false;
-  try{await cloudFetch('cliente_productos',`cliente_id=eq.${encodeURIComponent(clientId)}&producto_id=eq.${encodeURIComponent(dbProductId(productId))}`,{method:'DELETE'});return true;}catch(e){console.error(e);return false;}
+  try{await cloudFetch('cliente_productos',`cliente_id=eq.${encodeURIComponent(dbClientId(clientId))}&producto_id=eq.${encodeURIComponent(dbProductId(productId))}`,{method:'DELETE'});return true;}catch(e){console.error(e);return false;}
 }
 function cloudPrice(clientId,productId,value){const wt=weights[clientId]?.[productId];return cloudSaveClientProduct(clientId,productId,value,wt);}
 function cloudWeight(clientId,productId,value){const pr=prices[clientId]?.[productId];return cloudSaveClientProduct(clientId,productId,pr,value);}
@@ -196,7 +216,14 @@ function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state
 async function createNewProduct(){const name=$('#newProductName')?.value.trim();const marca=$('#newProductBrand')?.value.trim();const peso=$('#newProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const id='PROD-'+Date.now();const p={id,nombre:name,marca,codigo:id,pesoBase:peso===''?'':Number(peso),precioBase:0};catalog.push(p);save(STORAGE.catalog,catalog);const ok=await cloudCatalog(p);if(!ok){catalog=catalog.filter(x=>x.id!==id);save(STORAGE.catalog,catalog);toast('No se pudo crear el producto en Supabase');return;}selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];selectedProducts[state.selected.id].push(id);save(STORAGE.selectedProducts,selectedProducts);await cloudSelected(state.selected.id,id);if(peso!==''){weights[state.selected.id]=weights[state.selected.id]||{};weights[state.selected.id][id]=Number(peso);save(STORAGE.weights,weights);await cloudWeight(state.selected.id,id,Number(peso));}state.newProductOpen=false;toast('Producto creado y disponible para todos los clientes');render();}
 function removeProductFromClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=(selectedProducts[state.selected.id]||[]).filter(x=>x!==id);save(STORAGE.selectedProducts,selectedProducts);cloudUnselected(state.selected.id,id);toast('Producto quitado de este cliente');render();}
 function render(){const root=$('#app');root.innerHTML=state.view==='home'?home():clientView(state.selected);bind();}
-function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;const s=$('#search');if(s){s.oninput=e=>{state.search=e.target.value;render();requestAnimationFrame(()=>{const input=$('#search');if(input){input.focus();input.setSelectionRange(state.search.length,state.search.length);}})}}const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('.statusBtn').forEach(b=>b.onclick=()=>{visits[state.selected.id]=b.dataset.status;save(STORAGE.visits,visits);cloudVisit(state.selected.id,visits[state.selected.id]);toast(b.dataset.status==='Visitado'?'Visita marcada':'Visita destildada');render()});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=()=>{prices[state.selected.id]=prices[state.selected.id]||{};weights[state.selected.id]=weights[state.selected.id]||{};document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val)});document.querySelectorAll('[data-weight]').forEach(i=>{const val=i.value.trim();if(val==='')delete weights[state.selected.id][i.dataset.weight];else weights[state.selected.id][i.dataset.weight]=Number(val)});save(STORAGE.prices,prices);save(STORAGE.weights,weights);Object.entries(prices[state.selected.id]||{}).forEach(([pid,val])=>cloudPrice(state.selected.id,pid,val));Object.entries(weights[state.selected.id]||{}).forEach(([pid,val])=>cloudWeight(state.selected.id,pid,val));toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=()=>{state.catalogOpen=true;state.newProductOpen=false;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=false;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render()};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};}
+function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;const s=$('#search');if(s){s.oninput=e=>{state.search=e.target.value;render();requestAnimationFrame(()=>{const input=$('#search');if(input){input.focus();input.setSelectionRange(state.search.length,state.search.length);}})}}const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('.statusBtn').forEach(b=>b.onclick=async()=>{
+  const cid=state.selected.id, next=b.dataset.status;
+  const previous=visits[cid]||'Pendiente';
+  visits[cid]=next;save(STORAGE.visits,visits);render();
+  const ok=await cloudVisit(cid,next);
+  if(ok)toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');
+  else{visits[cid]=previous;save(STORAGE.visits,visits);toast('ERROR: no se pudo guardar la visita en Supabase');render();}
+});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=()=>{prices[state.selected.id]=prices[state.selected.id]||{};weights[state.selected.id]=weights[state.selected.id]||{};document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val)});document.querySelectorAll('[data-weight]').forEach(i=>{const val=i.value.trim();if(val==='')delete weights[state.selected.id][i.dataset.weight];else weights[state.selected.id][i.dataset.weight]=Number(val)});save(STORAGE.prices,prices);save(STORAGE.weights,weights);Object.entries(prices[state.selected.id]||{}).forEach(([pid,val])=>cloudPrice(state.selected.id,pid,val));Object.entries(weights[state.selected.id]||{}).forEach(([pid,val])=>cloudWeight(state.selected.id,pid,val));toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=()=>{state.catalogOpen=true;state.newProductOpen=false;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=false;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render()};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};}
 
 document.addEventListener('click',e=>{const card=e.target.closest('[data-client]');if(card){e.preventDefault();const cliente=CLIENTES.find(c=>String(c.id)===String(card.dataset.client));if(cliente){state.selected=cliente;state.view='client';state.productSearch='';state.catalogOpen=false;state.newProductOpen=false;render();}}});
 

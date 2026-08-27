@@ -4,7 +4,7 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#2563eb"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><title>BIPA Track</title>
 <script src="https://cdn.tailwindcss.com"></script><script>tailwind.config={darkMode:'class',theme:{extend:{boxShadow:{soft:'0 10px 35px rgba(15,23,42,.08)'}}}}</script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-<style>html,body{min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}html{overscroll-behavior-y:none}.safe{padding-bottom:env(safe-area-inset-bottom)}.glass{background:rgba(255,255,255,.76);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}.app-card{transition:border-color .2s,background-color .2s,box-shadow .2s}.hide-scroll::-webkit-scrollbar{display:none}.hide-scroll{scrollbar-width:none}modal-bg{background:rgba(15,23,42,.55);backdrop-filter:blur(8px)}input[type=number]::-webkit-inner-spin-button{opacity:.5}button,input,select{touch-action:manipulation;-webkit-tap-highlight-color:transparent}input,select{font-size:16px}@media(hover:none){.app-card:active,.statusBtn:active{transform:none!important}.hover\\:scale-\\[1\\.02\\]:hover,.hover\\:scale-105:hover{transform:none!important}}</style>
+<style>html,body{min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.safe{padding-bottom:env(safe-area-inset-bottom)}.glass{background:rgba(255,255,255,.76);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}.dark .glass{background:rgba(17,24,39,.78)}.app-card{transition:all .3s}.app-card:active{transform:scale(.985)}.hide-scroll::-webkit-scrollbar{display:none}.hide-scroll{scrollbar-width:none}modal-bg{background:rgba(15,23,42,.55);backdrop-filter:blur(8px)}input[type=number]::-webkit-inner-spin-button{opacity:.5}</style>
 </head>
 <body class="min-h-full bg-slate-100 text-slate-900 dark:bg-gray-900 dark:text-gray-100 transition-colors duration-300">
 <div id="app"></div>
@@ -22,13 +22,12 @@ const STORAGE={prices:'bipa_prices_v1',weights:'bipa_weights_v1',productEdits:'b
    ============================================================ */
 const CLOUD={
   enabled:true,
-  supabaseUrl:'https://qnbynijhmdbqgeeuljib.supabase.co',
-  supabaseAnonKey:'sb_publishable_3vF2sycL2edUA9ZTRTLoHA_oua_WkQ8',
-  apiBase:'https://qnbynijhmdbqgeeuljib.supabase.co/rest/v1'
+  supabaseUrl:'https://qgmbwvqzlmvzikizjish.supabase.co',
+  supabaseAnonKey:'sb_publishable_3p7AkmtJLMIXj8PO8YCGSg_WVfZD_a6',
+  apiBase:'https://qgmbwvqzlmvzikizjish.supabase.co/rest/v1'
 };
 let cloudReady=false;
 let cloudTimer=null;
-let cloudClientsTableAvailable=true;
 const cloudHeaders=()=>({
   apikey:CLOUD.supabaseAnonKey,
   Authorization:'Bearer '+CLOUD.supabaseAnonKey,
@@ -43,20 +42,7 @@ function clientKey(c){return [normText(c.nombre),normText(c.zona),normText(c.est
 function dbClientId(localId){return clientDbIds.get(String(localId))||localId;}
 function localClientId(dbId){return clientLocalIds.get(String(dbId))||dbId;}
 async function loadClientIdentityMap(){
-  // Los clientes actuales viven en este archivo; la tabla es opcional en el proyecto nuevo.
-  // Si existe, la usamos para vincular IDs. Si no existe, los IDs locales son los IDs remotos.
-  let dbClients=[];
-  if(cloudClientsTableAvailable){
-    try{
-      dbClients=await cloudFetch('clientes','select=id,nombre,zona,estadoGeografico,estado&order=id.asc');
-    }catch(firstError){
-      try{dbClients=await cloudFetch('clientes','select=id,nombre,zona,estado&order=id.asc');}
-      catch(secondError){cloudClientsTableAvailable=false;console.warn('BIPA: tabla clientes no disponible; se usaran los IDs locales',secondError);}
-    }
-  }
-  clientDbIds.clear();
-  clientLocalIds.clear();
-  for(const c of CLIENTES){clientDbIds.set(String(c.id),String(c.id));clientLocalIds.set(String(c.id),String(c.id));}
+  const dbClients=await cloudFetch('clientes','select=id,nombre,zona,estado&order=id.asc');
   const buckets=new Map();
   for(const d of (dbClients||[])){const k=clientKey(d);if(!buckets.has(k))buckets.set(k,[]);buckets.get(k).push(String(d.id));}
   let matched=0;
@@ -103,7 +89,7 @@ async function cloudLoad(){
     // Cuando la nube está activa, esta lista solo refleja lo que realmente existe en Supabase.
     catalog=merged;
 
-    const nextPrices={},nextWeights={},nextSelected={},nextVisits={};
+    const nextPrices={},nextWeights={},nextSelected={};
     for(const r of (dbLinks||[])){
       const pid=localProductIdFromDb(String(r.producto_id));
       const cid=localClientId(r.cliente_id);
@@ -115,13 +101,12 @@ async function cloudLoad(){
     }
     prices=nextPrices;weights=nextWeights;selectedProducts=nextSelected;
 
-    for(const r of (dbVisits||[])){const cid=localClientId(r.cliente_id);if(CLIENTES.some(c=>String(c.id)===String(cid)))nextVisits[cid]=r.visitado?'Visitado':'Pendiente';}
+    for(const r of (dbVisits||[])){const cid=localClientId(r.cliente_id);if(CLIENTES.some(c=>String(c.id)===String(cid)))visits[cid]=r.visitado?'Visitado':'Pendiente';}
 
-    visits=nextVisits;
+    save(STORAGE.catalog,catalog);save(STORAGE.prices,prices);save(STORAGE.weights,weights);save(STORAGE.visits,visits);save(STORAGE.selectedProducts,selectedProducts);
     cloudReady=true;
     render();
-  }catch(e){console.error('BIPA Supabase:',e);return false;}
-  return true;
+  }catch(e){console.error('BIPA Supabase:',e);toast('No se pudo sincronizar con Supabase');}
 }
 async function cloudSaveClientProduct(clientId,productId,price,weight){
   if(!cloudConfigured())return false;
@@ -163,7 +148,10 @@ async function cloudRefreshCatalog(){
       const old=oldCatalog.find(x=>String(x.dbId||x.id)===String(p.id)||String(x.codigo||'')===String(p.codigo||''));
       merged.push({id:old?.id||String(p.id),dbId:String(p.id),nombre:p.nombre||old?.nombre||'',marca:p.marca||old?.marca||'',codigo:p.codigo||old?.codigo||String(p.id),pesoBase:p.peso??old?.pesoBase??'',precioBase:old?.precioBase??0});
     }
+    // Nunca eliminamos un producto local que todavía esté pendiente de sincronización.
+    for(const p of oldCatalog){if(!merged.some(x=>String(x.dbId||x.id)===String(p.dbId||p.id)||String(x.codigo)===String(p.codigo))){merged.push(p);}}
     catalog=merged;
+    save(STORAGE.catalog,catalog);
     return true;
   }catch(e){console.error('BIPA catálogo global:',e);return false;}
 }
@@ -194,41 +182,20 @@ function cloudProductEdit(productId,value){const p=productById(productId);if(!p)
 
 const state={view:'home',search:'',zone:'ALL',geoState:'ALL',visit:'ALL',brand:'ALL',selected:null,productSearch:'',catalogOpen:false,newProductOpen:false,editProductId:null,dashboardBrand:'ALL',dashboardProduct:'ALL'};
 const $=s=>document.querySelector(s); const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const save=(k,v)=>{if(k===STORAGE.theme)localStorage.setItem(k,JSON.stringify(v));};
-let cloudSyncInFlight=null;
-let cloudSyncErrorNotified=false;
-async function syncFromCloud({refreshCatalog=false}={}){
-  if(!cloudConfigured())return false;
-  if(cloudSyncInFlight)return cloudSyncInFlight;
-  cloudSyncInFlight=(async()=>{
-    const loaded=await cloudLoad();
-    if(!loaded)throw new Error('No se pudo cargar el estado remoto');
-    if(refreshCatalog&&!await cloudRefreshCatalog())throw new Error('No se pudo cargar el catálogo remoto');
-    cloudSyncErrorNotified=false;
-    return true;
-  })().catch(e=>{
-    console.error('BIPA sincronización:',e);
-    if(!cloudSyncErrorNotified){toast('No se pudo sincronizar con Supabase');cloudSyncErrorNotified=true;}
-    return false;
-  }).finally(()=>{cloudSyncInFlight=null;});
-  return cloudSyncInFlight;
-}
-let prices={}, weights={}, productEdits={}, visits={}, custom={}, catalog=[], selectedProducts={};
+const load=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}}; const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+let prices=load(STORAGE.prices,{}), weights=load(STORAGE.weights,{}), productEdits=load(STORAGE.productEdits,{}), visits=load(STORAGE.visits,{}), custom=load(STORAGE.custom,{}), catalog=load(STORAGE.catalog,null), selectedProducts=load(STORAGE.selectedProducts,{});
 
-// Catálogo y estado global se cargan únicamente desde Supabase cuando está disponible.
-// El fallback local solo existe si la nube no responde.
+// Catálogo único global: los 55 productos originales + cualquier producto nuevo registrado.
+if(!Array.isArray(catalog)) catalog=[];
+const originalIds=new Set(PRODUCTOS.map(p=>p.id));
+PRODUCTOS.forEach(p=>{if(!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:p.pesoBase??''});});
+// Migración de productos personalizados creados en versiones anteriores.
+Object.values(custom||{}).flat().forEach(p=>{if(p&&!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:''});});
+save(STORAGE.catalog,catalog);
+
+// Si la nube está activa, no reinyectamos selecciones locales al arrancar.
+// Supabase manda y el estado local solo sirve como respaldo cuando no hay nube.
 if(!cloudConfigured()){
-  const load=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
-  prices=load(STORAGE.prices,{});
-  weights=load(STORAGE.weights,{});
-  productEdits=load(STORAGE.productEdits,{});
-  visits=load(STORAGE.visits,{});
-  custom=load(STORAGE.custom,{});
-  catalog=load(STORAGE.catalog,[]);
-  selectedProducts=load(STORAGE.selectedProducts,{});
-  if(!Array.isArray(catalog)) catalog=[];
-  PRODUCTOS.forEach(p=>{if(!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:p.pesoBase??''});});
-  Object.values(custom||{}).flat().forEach(p=>{if(p&&!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:''});});
   CLIENTES.forEach(c=>{
     if(!Array.isArray(selectedProducts[c.id])) selectedProducts[c.id]=[];
     const ids=new Set(selectedProducts[c.id]);
@@ -237,6 +204,7 @@ if(!cloudConfigured()){
     (custom[c.id]||[]).forEach(p=>ids.add(p.id));
     selectedProducts[c.id]=[...ids].filter(id=>catalog.some(p=>p.id===id));
   });
+  save(STORAGE.selectedProducts,selectedProducts);
 }
 
 function catalogProducts(){return catalog.map(p=>({...p,nombre:productEdits[p.id]?.nombre||p.nombre,marca:productEdits[p.id]?.marca||p.marca,pesoBase:productEdits[p.id]?.pesoBase??p.pesoBase??''}));}
@@ -320,7 +288,7 @@ function catalogModal(c){
 function newProductModal(){return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Agregar nuevo producto</h3><p class="text-xs text-slate-500">Se guardará en el catálogo global y quedará disponible para todos los clientes.</p></div><button id="closeNewProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="newProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="newProductName" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. Velón especial N°8"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="newProductBrand" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. BIPA"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="newProductWeight" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. 250"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-plus mr-2"></i>Guardar producto</button></form></div></div>`;}
 function editProduct(id){const p=productById(id);if(!p)return;state.editProductId=id;state.newProductOpen=false;render();requestAnimationFrame(()=>$('#editProductName')?.focus());}
 function editProductModal(id){const p=productById(id);if(!p)return '';return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Editar producto</h3><p class="text-xs text-slate-500">El cambio se actualizará en el catálogo global.</p></div><button id="closeEditProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="editProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="editProductName" value="${esc(p.nombre)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="editProductBrand" value="${esc(p.marca)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="editProductWeight" value="${esc(p.pesoBase??'')}" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-floppy-disk mr-2"></i>Guardar cambios</button></form></div></div>`;}
-async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);toast('No se pudo actualizar el producto en Supabase');return;}if(!await syncFromCloud()){toast('Producto actualizado, pero no se pudo refrescar la pantalla');return;}state.editProductId=null;toast('Producto actualizado para todos los clientes');render();}
+async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);save(STORAGE.catalog,catalog);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);save(STORAGE.catalog,catalog);toast('No se pudo actualizar el producto en Supabase');return;}state.editProductId=null;toast('Producto actualizado para todos los clientes');render();}
 async function removeProductFromClient(productId){
   if(!state.selected)return;
   const clientId=state.selected.id;
@@ -333,12 +301,14 @@ async function removeProductFromClient(productId){
   selectedProducts[clientId]=current.filter(pid=>String(pid)!==String(productId));
   if(prices[clientId])delete prices[clientId][productId];
   if(weights[clientId])delete weights[clientId][productId];
-  await syncFromCloud();
+  save(STORAGE.selectedProducts,selectedProducts);
+  save(STORAGE.prices,prices);
+  save(STORAGE.weights,weights);
   toast('Producto quitado del cliente');
   render();
 }
-async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}state.productSearch='';if(!await syncFromCloud()){toast('Producto eliminado, pero no se pudo refrescar la pantalla');return;}toast('Producto eliminado del catálogo global');render();}
-async function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)&&!await cloudSelected(state.selected.id,id)){toast('No se pudo añadir el producto en Supabase');return;}state.catalogOpen=false;state.productSearch='';if(!await syncFromCloud()){toast('Producto añadido, pero no se pudo refrescar la pantalla');return;}toast('Producto añadido al cliente');render();}
+async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}catalog=catalog.filter(x=>x.id!==id);for(const c of CLIENTES){selectedProducts[c.id]=(selectedProducts[c.id]||[]).filter(pid=>pid!==id);if(prices[c.id])delete prices[c.id][id];if(weights[c.id])delete weights[c.id][id];}save(STORAGE.catalog,catalog);save(STORAGE.selectedProducts,selectedProducts);save(STORAGE.prices,prices);save(STORAGE.weights,weights);state.productSearch='';toast('Producto eliminado del catálogo global');render();}
+function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)){selectedProducts[state.selected.id].push(id);save(STORAGE.selectedProducts,selectedProducts);cloudSelected(state.selected.id,id);}state.catalogOpen=false;state.productSearch='';toast('Producto añadido al cliente');render();}
 async function createNewProduct(){
   const name=$('#newProductName')?.value.trim();
   const marca=$('#newProductBrand')?.value.trim();
@@ -349,15 +319,10 @@ async function createNewProduct(){
   const created=await cloudCatalog(p);
   if(!created){toast('No se pudo crear el producto en Supabase');return;}
   if(created.id){p.dbId=String(created.id);p.id=String(created.id);p.codigo=created.codigo||p.codigo;}
-  await syncFromCloud({refreshCatalog:true});
-  if(state.selected){
-    selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];
-    if(!selectedProducts[state.selected.id].includes(p.id)){
-      selectedProducts[state.selected.id].push(p.id);
-      if(!await cloudSelected(state.selected.id,p.id)){toast('Producto creado, pero no se pudo asociarlo al cliente');return;}
-    }
-    await syncFromCloud();
-  }
+  catalog=catalog.filter(x=>x.id!==id&&x.codigo!==p.codigo);catalog.push(p);save(STORAGE.catalog,catalog);
+  selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];
+  if(!selectedProducts[state.selected.id].includes(p.id))selectedProducts[state.selected.id].push(p.id);save(STORAGE.selectedProducts,selectedProducts);await cloudSelected(state.selected.id,p.id);
+  await cloudRefreshCatalog();
   state.newProductOpen=false;state.catalogOpen=true;state.productSearch='';toast('Producto creado y disponible para todos los clientes');render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());
 }
 
@@ -371,52 +336,23 @@ function dashboard(){
   const products=selP==='ALL'?d.products:d.products.filter(p=>p.product.nombre===selP);
   return `<div class="min-h-screen max-w-7xl mx-auto p-3 sm:p-5"><header class="glass sticky top-0 z-30 rounded-3xl border border-slate-200 dark:border-gray-700 shadow-soft px-4 py-3 mb-5"><div class="flex items-center justify-between gap-3"><div class="flex items-center gap-3"><div class="w-11 h-11 rounded-2xl bg-blue-600 text-white grid place-items-center shadow-lg"><i class="fa-solid fa-chart-simple"></i></div><div><div class="font-black">BIPA <span class="text-blue-600">Track</span></div><div class="text-xs text-slate-500">Dashboard informativo</div></div></div><div class="flex gap-2"><button id="backBtn" type="button" class="px-4 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 font-black"><i class="fa-solid fa-arrow-left mr-1"></i>Volver</button><button id="themeBtn" type="button" class="w-11 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 transition-all hover:scale-105"><i class="fa-solid fa-sun dark:hidden"></i><i class="fa-solid fa-moon hidden dark:inline"></i></button></div></div></header><div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5"><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-signal text-blue-600"></i><div class="text-2xl font-black mt-2">${d.clientsWithRadar}</div><div class="text-xs text-slate-500">Clientes con radar</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-arrow-down text-emerald-600"></i><div class="text-base font-black mt-2 truncate">${d.brands[0]?esc(d.brands[0].brand):'-'}</div><div class="text-xs text-slate-500">Marca más barata</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-arrow-up text-rose-600"></i><div class="text-base font-black mt-2 truncate">${d.brands.length?esc(d.brands[d.brands.length-1].brand):'-'}</div><div class="text-xs text-slate-500">Marca más cara</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-boxes-stacked text-indigo-600"></i><div class="text-2xl font-black mt-2">${d.products.length}</div><div class="text-xs text-slate-500">Productos con precio</div></div></div><section class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft mb-5"><div class="grid grid-cols-1 md:grid-cols-2 gap-3"><div><label class="block text-xs font-bold text-slate-500 mb-1">Comparar marca</label><select id="dashBrand" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todas las marcas</option>${brandOpts.map(x=>`<option ${selB===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Comparar producto</label><select id="dashProduct" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todos los productos</option>${prodOpts.map(x=>`<option ${selP===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select></div></div></section><section class="grid lg:grid-cols-2 gap-5"><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><div class="mb-3"><h2 class="text-lg font-black">Marcas comparadas</h2><p class="text-xs text-slate-500">Promedio, mínimo y máximo</p></div><div class="space-y-2">${brands.length?brands.map(b=>`<div class="rounded-2xl border border-slate-200 dark:border-gray-700 p-3"><div class="flex items-center justify-between gap-3 mb-2"><div class="font-bold text-sm truncate">${esc(b.brand)}</div><div class="text-xs text-slate-500">${b.count} registros</div></div><div class="grid grid-cols-3 gap-2 text-xs"><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Promedio</div><div class="font-black">${money(b.avg)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Mín</div><div class="font-black">${money(b.min)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Máx</div><div class="font-black">${money(b.max)}</div></div></div></div>`).join(''):`<div class="py-10 text-center text-slate-400">No hay datos de marcas.</div>`}</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><div class="mb-3"><h2 class="text-lg font-black">Productos comparados</h2><p class="text-xs text-slate-500">Selección filtrable por producto</p></div><div class="space-y-2">${products.length?products.map(p=>`<div class="rounded-2xl border border-slate-200 dark:border-gray-700 p-3"><div class="font-bold text-sm truncate">${esc(p.product.nombre)}</div><div class="text-xs text-slate-500 mb-2">${esc(p.product.marca)} · ${esc(p.product.codigo||'')}</div><div class="grid grid-cols-3 gap-2 text-xs"><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Promedio</div><div class="font-black">${money(p.avg)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Mín</div><div class="font-black">${money(p.min)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Máx</div><div class="font-black">${money(p.max)}</div></div></div></div>`).join(''):`<div class="py-10 text-center text-slate-400">No hay datos de productos.</div>`}</div></div></section><div id="toast"></div></div>`;
 }
-let filterTimer=null;
-function bindFilter(inputId,stateKey){
-  const input=$(inputId);if(!input)return;
-  input.oninput=e=>{
-    state[stateKey]=e.target.value;
-    clearTimeout(filterTimer);
-    filterTimer=setTimeout(()=>{
-      const keepFocus=document.activeElement===input;
-      render();
-      if(keepFocus)requestAnimationFrame(()=>{const next=$(inputId);if(next){next.focus();next.setSelectionRange(state[stateKey].length,state[stateKey].length);}});
-    },120);
-  };
-}
-function render(){
-  const active=document.activeElement;
-  const keep=active&&active.matches('input,select,textarea');
-  const focusId=keep?active.id:'';
-  const priceId=keep&&active.dataset.price!==undefined?active.dataset.price:'';
-  const value=keep?active.value:'';
-  const start=keep&&typeof active.selectionStart==='number'?active.selectionStart:null;
-  const end=keep&&typeof active.selectionEnd==='number'?active.selectionEnd:null;
-  const root=$('#app');root.innerHTML=state.view==='home'?home():state.view==='dashboard'?dashboard():clientView(state.selected);bind();
-  if(keep)requestAnimationFrame(()=>{
-    const next=priceId?[...document.querySelectorAll('[data-price]')].find(x=>x.dataset.price===priceId):focusId?$('#'+focusId):null;
-    if(!next)return;
-    next.focus();
-    if(priceId)next.value=value;
-    if(start!==null&&typeof next.setSelectionRange==='function')next.setSelectionRange(start,end===null?start:end);
-  });
-}
-function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;bindFilter('#search','search');const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('.statusBtn').forEach(b=>b.onclick=async()=>{
+function render(){const root=$('#app');root.innerHTML=state.view==='home'?home():state.view==='dashboard'?dashboard():clientView(state.selected);bind();}
+function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;const s=$('#search');if(s){s.oninput=e=>{state.search=e.target.value;render();requestAnimationFrame(()=>{const input=$('#search');if(input){input.focus();input.setSelectionRange(state.search.length,state.search.length);}})}}const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('.statusBtn').forEach(b=>b.onclick=async()=>{
   const cid=state.selected.id, next=b.dataset.status;
   const previous=visits[cid]||'Pendiente';
-  visits[cid]=next;render();
+  visits[cid]=next;save(STORAGE.visits,visits);render();
   const ok=await cloudVisit(cid,next);
-  if(ok&&await syncFromCloud()){toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');}
-  else{visits[cid]=previous;toast('ERROR: no se pudo guardar la visita en Supabase');render();}
-});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));bindFilter('#productSearch','productSearch');const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=async()=>{prices[state.selected.id]=prices[state.selected.id]||{};const payload=[];document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val);payload.push(cloudPrice(state.selected.id,i.dataset.price,val===''?'':Number(val)));});const results=await Promise.all(payload);if(!results.every(Boolean)||!await syncFromCloud()){toast('No se pudo guardar el registro en Supabase');return;}toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{if(!await syncFromCloud({refreshCatalog:true}))return;state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};bindFilter('#catalogSearch','productSearch');document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
+  if(ok)toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');
+  else{visits[cid]=previous;save(STORAGE.visits,visits);toast('ERROR: no se pudo guardar la visita en Supabase');render();}
+});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=()=>{prices[state.selected.id]=prices[state.selected.id]||{};document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val)});save(STORAGE.prices,prices);Object.entries(prices[state.selected.id]||{}).forEach(([pid,val])=>cloudPrice(state.selected.id,pid,val));toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{await cloudRefreshCatalog();state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
 
 document.addEventListener('click',e=>{const dash=e.target.closest('#dashboardBtn');if(dash){e.preventDefault();state.view='dashboard';render();}});
 
 document.addEventListener('click',e=>{const card=e.target.closest('[data-client]');if(card){e.preventDefault();const cliente=CLIENTES.find(c=>String(c.id)===String(card.dataset.client));if(cliente){state.selected=cliente;state.view='client';state.productSearch='';state.catalogOpen=false;state.newProductOpen=false;render();}}});
 
-function exportCSV(){const rows=[["Cliente","Marca","Producto","Peso","Precio"]];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);ps.forEach(p=>{rows.push([c.nombre,p.marca,p.nombre,p.pesoBase??"",prices[c.id]?.[p.id]??""])})});const csv="\ufeff"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`bipa_track_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast("CSV exportado");}
+function exportCSV(){const rows=[["Cliente","Marca","Producto","Peso","Precio"]];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);ps.forEach(p=>{rows.push([c.nombre,p.marca,p.nombre,p.pesoBase??"",prices[c.id]?.[p.id]??""])})});const csv="\ufeff"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,"")}"`).join(",")).join("\r\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`bipa_track_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast("CSV exportado");}
 let toastTimer;function toast(msg){clearTimeout(toastTimer);const el=$('#toast');if(!el)return;el.innerHTML=`<div class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-2xl bg-gray-900 text-white shadow-xl flex items-center gap-2 text-sm font-bold"><i class="fa-solid fa-circle-check text-emerald-400"></i>${esc(msg)}</div>`;toastTimer=setTimeout(()=>el.innerHTML='',3000)}
-(function(){if(cloudConfigured()){setTimeout(()=>syncFromCloud({refreshCatalog:true}),250);cloudTimer=setInterval(()=>{if(document.visibilityState==='visible')syncFromCloud({refreshCatalog:true});},15000);}})();
+(function(){if(cloudConfigured()){setTimeout(()=>cloudLoad(),250);cloudTimer=setInterval(()=>cloudLoad(),15000);}})();
 
 (function(){if(localStorage.getItem(STORAGE.theme)==='dark'||(!localStorage.getItem(STORAGE.theme)&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark');render()})();
 </script></body></html>

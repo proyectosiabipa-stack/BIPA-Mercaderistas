@@ -42,7 +42,7 @@ function clientKey(c){return [normText(c.nombre),normText(c.zona),normText(c.est
 function dbClientId(localId){return clientDbIds.get(String(localId))||localId;}
 function localClientId(dbId){return clientLocalIds.get(String(dbId))||dbId;}
 async function loadClientIdentityMap(){
-  const dbClients=await cloudFetch('clientes','select=id,nombre,zona,estado&order=id.asc');
+  const dbClients=await cloudFetch('clientes','select=id,nombre,zona,estadoGeografico,estado&order=id.asc');
   const buckets=new Map();
   for(const d of (dbClients||[])){const k=clientKey(d);if(!buckets.has(k))buckets.set(k,[]);buckets.get(k).push(String(d.id));}
   let matched=0;

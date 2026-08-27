@@ -79,39 +79,28 @@ async function cloudLoad(){
       cloudFetch('visitas','select=cliente_id,visitado')
     ]);
 
-    const oldCatalog=catalog.slice();
-    const byDb=new Map((dbProducts||[]).map(p=>[String(p.id),p]));
-    const byCode=new Map((dbProducts||[]).map(p=>[String(p.codigo||''),p]));
     const merged=[];
     for(const p of (dbProducts||[])){
-      const old=oldCatalog.find(x=>String(x.dbId||x.id)===String(p.id)||String(x.codigo||'')===String(p.codigo||''));
       merged.push({
-        id:old?.id||String(p.id),dbId:String(p.id),nombre:p.nombre||old?.nombre||'',marca:p.marca||old?.marca||'',codigo:p.codigo||old?.codigo||String(p.id),
-        pesoBase:p.peso??old?.pesoBase??'',precioBase:old?.precioBase??0
+        id:String(p.id),dbId:String(p.id),nombre:p.nombre||'',marca:p.marca||'',codigo:p.codigo||String(p.id),
+        pesoBase:p.peso??'',precioBase:0
       });
     }
-    // Mantiene temporalmente productos locales que aún no hayan subido.
-    for(const p of oldCatalog){if(!merged.some(x=>String(x.dbId||x.id)===String(p.dbId||p.id)||String(x.codigo)===String(p.codigo))){merged.push(p);}}
+    // Cuando la nube está activa, esta lista solo refleja lo que realmente existe en Supabase.
     catalog=merged;
 
-    // Migración de identificadores locales PROD-001 -> IDs reales P-001.
-    const oldToNew={};
-    for(const p of oldCatalog){const db=byDb.get(String(p.dbId||p.codigo))||byCode.get(String(p.codigo||''));if(db)oldToNew[p.id]=localProductIdFromDb(db.id);}
     const nextPrices={},nextWeights={},nextSelected={};
-    for(const [cid,vals] of Object.entries(prices||{})){nextPrices[cid]={};for(const [pid,v] of Object.entries(vals||{}))nextPrices[cid][oldToNew[pid]||pid]=v;}
-    for(const [cid,vals] of Object.entries(weights||{})){nextWeights[cid]={};for(const [pid,v] of Object.entries(vals||{}))nextWeights[cid][oldToNew[pid]||pid]=v;}
-    for(const [cid,ids] of Object.entries(selectedProducts||{}))nextSelected[cid]=[...new Set((ids||[]).map(pid=>oldToNew[pid]||pid))];
-    prices=nextPrices;weights=nextWeights;selectedProducts=nextSelected;
-
     for(const r of (dbLinks||[])){
       const pid=localProductIdFromDb(String(r.producto_id));
       const cid=localClientId(r.cliente_id);
       if(!CLIENTES.some(c=>String(c.id)===String(cid)))continue;
-      selectedProducts[cid]=selectedProducts[cid]||[];
-      if(!selectedProducts[cid].includes(pid))selectedProducts[cid].push(pid);
-      prices[cid]=prices[cid]||{}; if(r.precio!==null&&r.precio!==undefined)prices[cid][pid]=Number(r.precio);
-      weights[cid]=weights[cid]||{}; if(r.peso!==null&&r.peso!==undefined)weights[cid][pid]=Number(r.peso);
+      nextSelected[cid]=nextSelected[cid]||[];
+      if(!nextSelected[cid].includes(pid))nextSelected[cid].push(pid);
+      nextPrices[cid]=nextPrices[cid]||{}; if(r.precio!==null&&r.precio!==undefined)nextPrices[cid][pid]=Number(r.precio);
+      nextWeights[cid]=nextWeights[cid]||{}; if(r.peso!==null&&r.peso!==undefined)nextWeights[cid][pid]=Number(r.peso);
     }
+    prices=nextPrices;weights=nextWeights;selectedProducts=nextSelected;
+
     for(const r of (dbVisits||[])){const cid=localClientId(r.cliente_id);if(CLIENTES.some(c=>String(c.id)===String(cid)))visits[cid]=r.visitado?'Visitado':'Pendiente';}
 
     save(STORAGE.catalog,catalog);save(STORAGE.prices,prices);save(STORAGE.weights,weights);save(STORAGE.visits,visits);save(STORAGE.selectedProducts,selectedProducts);
@@ -204,17 +193,19 @@ PRODUCTOS.forEach(p=>{if(!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoB
 Object.values(custom||{}).flat().forEach(p=>{if(p&&!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:''});});
 save(STORAGE.catalog,catalog);
 
-// Si ya había precios/pesos registrados antes de esta versión, se consideran seleccionados para no perder información.
-CLIENTES.forEach(c=>{
-  if(!Array.isArray(selectedProducts[c.id])) selectedProducts[c.id]=[];
-  const ids=new Set(selectedProducts[c.id]);
-  Object.keys(prices[c.id]||{}).forEach(id=>ids.add(id));
-  Object.keys(weights[c.id]||{}).forEach(id=>ids.add(id));
-  // Migración: productos personalizados antiguos pertenecen inicialmente al cliente donde fueron creados.
-  (custom[c.id]||[]).forEach(p=>ids.add(p.id));
-  selectedProducts[c.id]=[...ids].filter(id=>catalog.some(p=>p.id===id));
-});
-save(STORAGE.selectedProducts,selectedProducts);
+// Si la nube está activa, no reinyectamos selecciones locales al arrancar.
+// Supabase manda y el estado local solo sirve como respaldo cuando no hay nube.
+if(!cloudConfigured()){
+  CLIENTES.forEach(c=>{
+    if(!Array.isArray(selectedProducts[c.id])) selectedProducts[c.id]=[];
+    const ids=new Set(selectedProducts[c.id]);
+    Object.keys(prices[c.id]||{}).forEach(id=>ids.add(id));
+    Object.keys(weights[c.id]||{}).forEach(id=>ids.add(id));
+    (custom[c.id]||[]).forEach(p=>ids.add(p.id));
+    selectedProducts[c.id]=[...ids].filter(id=>catalog.some(p=>p.id===id));
+  });
+  save(STORAGE.selectedProducts,selectedProducts);
+}
 
 function catalogProducts(){return catalog.map(p=>({...p,nombre:productEdits[p.id]?.nombre||p.nombre,marca:productEdits[p.id]?.marca||p.marca,pesoBase:productEdits[p.id]?.pesoBase??p.pesoBase??''}));}
 function productById(id){return catalogProducts().find(p=>p.id===id);}
@@ -359,7 +350,7 @@ document.addEventListener('click',e=>{const dash=e.target.closest('#dashboardBtn
 
 document.addEventListener('click',e=>{const card=e.target.closest('[data-client]');if(card){e.preventDefault();const cliente=CLIENTES.find(c=>String(c.id)===String(card.dataset.client));if(cliente){state.selected=cliente;state.view='client';state.productSearch='';state.catalogOpen=false;state.newProductOpen=false;render();}}});
 
-function exportCSV(){const rows=[['Cliente ID','Cliente','Zona','Estado geográfico','Estado visita','Producto ID','Producto','Marca','Código','Precio','Peso (g)']];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);if(!ps.length){rows.push([c.id,c.nombre,c.zona,c.estadoGeografico,visitStatus(c.id),'','','','','','']);return;}ps.forEach(p=>{const val=prices[c.id]?.[p.id]??'';const wt=p.pesoBase??'';rows.push([c.id,c.nombre,c.zona,c.estadoGeografico,visitStatus(c.id),p.id,p.nombre,p.marca,p.codigo,val,wt])});});const csv='\ufeff'+rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`bipa_mercaderistas_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast('CSV exportado');}
+function exportCSV(){const rows=[["Cliente","Marca","Producto","Peso","Precio"]];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);ps.forEach(p=>{rows.push([c.nombre,p.marca,p.nombre,p.pesoBase??"",prices[c.id]?.[p.id]??""])})});const csv="\ufeff"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,"")}"`).join(",")).join("\r\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`bipa_track_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast("CSV exportado");}
 let toastTimer;function toast(msg){clearTimeout(toastTimer);const el=$('#toast');if(!el)return;el.innerHTML=`<div class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-2xl bg-gray-900 text-white shadow-xl flex items-center gap-2 text-sm font-bold"><i class="fa-solid fa-circle-check text-emerald-400"></i>${esc(msg)}</div>`;toastTimer=setTimeout(()=>el.innerHTML='',3000)}
 (function(){if(cloudConfigured()){setTimeout(()=>cloudLoad(),250);cloudTimer=setInterval(()=>cloudLoad(),15000);}})();
 

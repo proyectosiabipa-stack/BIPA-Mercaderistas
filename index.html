@@ -28,6 +28,7 @@ const CLOUD={
 };
 let cloudReady=false;
 let cloudTimer=null;
+let cloudClientsTableAvailable=true;
 const cloudHeaders=()=>({
   apikey:CLOUD.supabaseAnonKey,
   Authorization:'Bearer '+CLOUD.supabaseAnonKey,
@@ -42,7 +43,20 @@ function clientKey(c){return [normText(c.nombre),normText(c.zona),normText(c.est
 function dbClientId(localId){return clientDbIds.get(String(localId))||localId;}
 function localClientId(dbId){return clientLocalIds.get(String(dbId))||dbId;}
 async function loadClientIdentityMap(){
-  const dbClients=await cloudFetch('clientes','select=id,nombre,zona,estadoGeografico,estado&order=id.asc');
+  // Los clientes actuales viven en este archivo; la tabla es opcional en el proyecto nuevo.
+  // Si existe, la usamos para vincular IDs. Si no existe, los IDs locales son los IDs remotos.
+  let dbClients=[];
+  if(cloudClientsTableAvailable){
+    try{
+      dbClients=await cloudFetch('clientes','select=id,nombre,zona,estadoGeografico,estado&order=id.asc');
+    }catch(firstError){
+      try{dbClients=await cloudFetch('clientes','select=id,nombre,zona,estado&order=id.asc');}
+      catch(secondError){cloudClientsTableAvailable=false;console.warn('BIPA: tabla clientes no disponible; se usaran los IDs locales',secondError);}
+    }
+  }
+  clientDbIds.clear();
+  clientLocalIds.clear();
+  for(const c of CLIENTES){clientDbIds.set(String(c.id),String(c.id));clientLocalIds.set(String(c.id),String(c.id));}
   const buckets=new Map();
   for(const d of (dbClients||[])){const k=clientKey(d);if(!buckets.has(k))buckets.set(k,[]);buckets.get(k).push(String(d.id));}
   let matched=0;
@@ -106,17 +120,8 @@ async function cloudLoad(){
     visits=nextVisits;
     cloudReady=true;
     render();
-  }catch(e){console.error('BIPA Supabase:',e);toast('No se pudo sincronizar con Supabase');}
-}
-async function cloudSeedBaseProducts(){
-  if(!cloudConfigured())return;
-  try{
-    const existing=await cloudFetch('productos','select=id');
-    if((existing||[]).length)return;
-    for(const p of PRODUCTOS){
-      await cloudFetch('productos','',{method:'POST',headers:{'Prefer':'return=representation'},body:JSON.stringify({id:p.id,nombre:p.nombre,marca:p.marca,codigo:p.codigo,peso:p.pesoBase===''?null:Number(p.pesoBase)})});
-    }
-  }catch(e){console.error('BIPA seed productos:',e);}
+  }catch(e){console.error('BIPA Supabase:',e);return false;}
+  return true;
 }
 async function cloudSaveClientProduct(clientId,productId,price,weight){
   if(!cloudConfigured())return false;
@@ -151,7 +156,6 @@ async function cloudAddProduct(product){
 async function cloudRefreshCatalog(){
   if(!cloudConfigured())return false;
   try{
-    await cloudSeedBaseProducts();
     const dbProducts=await cloudFetch('productos','select=id,nombre,marca,codigo,peso&order=id.asc');
     const oldCatalog=catalog.slice();
     const merged=[];
@@ -191,10 +195,23 @@ function cloudProductEdit(productId,value){const p=productById(productId);if(!p)
 const state={view:'home',search:'',zone:'ALL',geoState:'ALL',visit:'ALL',brand:'ALL',selected:null,productSearch:'',catalogOpen:false,newProductOpen:false,editProductId:null,dashboardBrand:'ALL',dashboardProduct:'ALL'};
 const $=s=>document.querySelector(s); const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const save=(k,v)=>{if(k===STORAGE.theme)localStorage.setItem(k,JSON.stringify(v));};
+let cloudSyncInFlight=null;
+let cloudSyncErrorNotified=false;
 async function syncFromCloud({refreshCatalog=false}={}){
-  if(!cloudConfigured())return;
-  await cloudLoad();
-  if(refreshCatalog)await cloudRefreshCatalog();
+  if(!cloudConfigured())return false;
+  if(cloudSyncInFlight)return cloudSyncInFlight;
+  cloudSyncInFlight=(async()=>{
+    const loaded=await cloudLoad();
+    if(!loaded)throw new Error('No se pudo cargar el estado remoto');
+    if(refreshCatalog&&!await cloudRefreshCatalog())throw new Error('No se pudo cargar el catálogo remoto');
+    cloudSyncErrorNotified=false;
+    return true;
+  })().catch(e=>{
+    console.error('BIPA sincronización:',e);
+    if(!cloudSyncErrorNotified){toast('No se pudo sincronizar con Supabase');cloudSyncErrorNotified=true;}
+    return false;
+  }).finally(()=>{cloudSyncInFlight=null;});
+  return cloudSyncInFlight;
 }
 let prices={}, weights={}, productEdits={}, visits={}, custom={}, catalog=[], selectedProducts={};
 
@@ -303,7 +320,7 @@ function catalogModal(c){
 function newProductModal(){return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Agregar nuevo producto</h3><p class="text-xs text-slate-500">Se guardará en el catálogo global y quedará disponible para todos los clientes.</p></div><button id="closeNewProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="newProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="newProductName" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. Velón especial N°8"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="newProductBrand" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. BIPA"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="newProductWeight" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. 250"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-plus mr-2"></i>Guardar producto</button></form></div></div>`;}
 function editProduct(id){const p=productById(id);if(!p)return;state.editProductId=id;state.newProductOpen=false;render();requestAnimationFrame(()=>$('#editProductName')?.focus());}
 function editProductModal(id){const p=productById(id);if(!p)return '';return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Editar producto</h3><p class="text-xs text-slate-500">El cambio se actualizará en el catálogo global.</p></div><button id="closeEditProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="editProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="editProductName" value="${esc(p.nombre)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="editProductBrand" value="${esc(p.marca)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="editProductWeight" value="${esc(p.pesoBase??'')}" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-floppy-disk mr-2"></i>Guardar cambios</button></form></div></div>`;}
-async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);toast('No se pudo actualizar el producto en Supabase');return;}state.editProductId=null;await syncFromCloud();toast('Producto actualizado para todos los clientes');render();}
+async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);toast('No se pudo actualizar el producto en Supabase');return;}if(!await syncFromCloud()){toast('Producto actualizado, pero no se pudo refrescar la pantalla');return;}state.editProductId=null;toast('Producto actualizado para todos los clientes');render();}
 async function removeProductFromClient(productId){
   if(!state.selected)return;
   const clientId=state.selected.id;
@@ -320,8 +337,8 @@ async function removeProductFromClient(productId){
   toast('Producto quitado del cliente');
   render();
 }
-async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}state.productSearch='';await syncFromCloud();toast('Producto eliminado del catálogo global');render();}
-async function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)){selectedProducts[state.selected.id].push(id);await cloudSelected(state.selected.id,id);}state.catalogOpen=false;state.productSearch='';await syncFromCloud();toast('Producto añadido al cliente');render();}
+async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}state.productSearch='';if(!await syncFromCloud()){toast('Producto eliminado, pero no se pudo refrescar la pantalla');return;}toast('Producto eliminado del catálogo global');render();}
+async function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)&&!await cloudSelected(state.selected.id,id)){toast('No se pudo añadir el producto en Supabase');return;}state.catalogOpen=false;state.productSearch='';if(!await syncFromCloud()){toast('Producto añadido, pero no se pudo refrescar la pantalla');return;}toast('Producto añadido al cliente');render();}
 async function createNewProduct(){
   const name=$('#newProductName')?.value.trim();
   const marca=$('#newProductBrand')?.value.trim();
@@ -337,7 +354,7 @@ async function createNewProduct(){
     selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];
     if(!selectedProducts[state.selected.id].includes(p.id)){
       selectedProducts[state.selected.id].push(p.id);
-      await cloudSelected(state.selected.id,p.id);
+      if(!await cloudSelected(state.selected.id,p.id)){toast('Producto creado, pero no se pudo asociarlo al cliente');return;}
     }
     await syncFromCloud();
   }
@@ -360,9 +377,9 @@ function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElem
   const previous=visits[cid]||'Pendiente';
   visits[cid]=next;render();
   const ok=await cloudVisit(cid,next);
-  if(ok){await syncFromCloud();toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');}
+  if(ok&&await syncFromCloud()){toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');}
   else{visits[cid]=previous;toast('ERROR: no se pudo guardar la visita en Supabase');render();}
-});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=async()=>{prices[state.selected.id]=prices[state.selected.id]||{};const payload=[];document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val);payload.push(cloudPrice(state.selected.id,i.dataset.price,val===''?'':Number(val)));});await Promise.all(payload);await syncFromCloud();toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{await syncFromCloud({refreshCatalog:true});state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
+});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=async()=>{prices[state.selected.id]=prices[state.selected.id]||{};const payload=[];document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val);payload.push(cloudPrice(state.selected.id,i.dataset.price,val===''?'':Number(val)));});const results=await Promise.all(payload);if(!results.every(Boolean)||!await syncFromCloud()){toast('No se pudo guardar el registro en Supabase');return;}toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{if(!await syncFromCloud({refreshCatalog:true}))return;state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
 
 document.addEventListener('click',e=>{const dash=e.target.closest('#dashboardBtn');if(dash){e.preventDefault();state.view='dashboard';render();}});
 

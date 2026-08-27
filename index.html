@@ -89,7 +89,7 @@ async function cloudLoad(){
     // Cuando la nube está activa, esta lista solo refleja lo que realmente existe en Supabase.
     catalog=merged;
 
-    const nextPrices={},nextWeights={},nextSelected={};
+    const nextPrices={},nextWeights={},nextSelected={},nextVisits={};
     for(const r of (dbLinks||[])){
       const pid=localProductIdFromDb(String(r.producto_id));
       const cid=localClientId(r.cliente_id);
@@ -101,9 +101,9 @@ async function cloudLoad(){
     }
     prices=nextPrices;weights=nextWeights;selectedProducts=nextSelected;
 
-    for(const r of (dbVisits||[])){const cid=localClientId(r.cliente_id);if(CLIENTES.some(c=>String(c.id)===String(cid)))visits[cid]=r.visitado?'Visitado':'Pendiente';}
+    for(const r of (dbVisits||[])){const cid=localClientId(r.cliente_id);if(CLIENTES.some(c=>String(c.id)===String(cid)))nextVisits[cid]=r.visitado?'Visitado':'Pendiente';}
 
-    save(STORAGE.catalog,catalog);save(STORAGE.prices,prices);save(STORAGE.weights,weights);save(STORAGE.visits,visits);save(STORAGE.selectedProducts,selectedProducts);
+    visits=nextVisits;
     cloudReady=true;
     render();
   }catch(e){console.error('BIPA Supabase:',e);toast('No se pudo sincronizar con Supabase');}
@@ -148,12 +148,7 @@ async function cloudRefreshCatalog(){
       const old=oldCatalog.find(x=>String(x.dbId||x.id)===String(p.id)||String(x.codigo||'')===String(p.codigo||''));
       merged.push({id:old?.id||String(p.id),dbId:String(p.id),nombre:p.nombre||old?.nombre||'',marca:p.marca||old?.marca||'',codigo:p.codigo||old?.codigo||String(p.id),pesoBase:p.peso??old?.pesoBase??'',precioBase:old?.precioBase??0});
     }
-    // FIX: la nube es la fuente de verdad del catálogo. Antes, cualquier producto local
-    // que ya no existiera en Supabase se volvía a insertar aquí ("pendiente de sincronización"),
-    // lo que resucitaba productos recién eliminados. Ahora el catálogo refleja exactamente
-    // lo que hay en Supabase.
     catalog=merged;
-    save(STORAGE.catalog,catalog);
     return true;
   }catch(e){console.error('BIPA catálogo global:',e);return false;}
 }
@@ -184,26 +179,34 @@ function cloudProductEdit(productId,value){const p=productById(productId);if(!p)
 
 const state={view:'home',search:'',zone:'ALL',geoState:'ALL',visit:'ALL',brand:'ALL',selected:null,productSearch:'',catalogOpen:false,newProductOpen:false,editProductId:null,dashboardBrand:'ALL',dashboardProduct:'ALL'};
 const $=s=>document.querySelector(s); const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const load=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}}; const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
-let prices=load(STORAGE.prices,{}), weights=load(STORAGE.weights,{}), productEdits=load(STORAGE.productEdits,{}), visits=load(STORAGE.visits,{}), custom=load(STORAGE.custom,{}), catalog=load(STORAGE.catalog,null), selectedProducts=load(STORAGE.selectedProducts,{});
-
-// Catálogo único global: los productos originales + cualquier producto nuevo registrado.
-if(!Array.isArray(catalog)) catalog=[];
-// FIX: cuando la nube está activa, Supabase es la ÚNICA fuente de verdad del catálogo.
-// Antes, este bloque se ejecutaba siempre y volvía a insertar los productos originales
-// (y los "custom" heredados) aunque ya hubieran sido borrados en Supabase; si cloudLoad()
-// todavía no terminaba (o fallaba por red), esos productos "resucitados" quedaban guardados
-// en localStorage de forma permanente. Ahora solo se usa como semilla cuando NO hay nube.
-if(!cloudConfigured()){
-  PRODUCTOS.forEach(p=>{if(!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:p.pesoBase??''});});
-  // Migración de productos personalizados creados en versiones anteriores.
-  Object.values(custom||{}).flat().forEach(p=>{if(p&&!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:''});});
-  save(STORAGE.catalog,catalog);
+const load=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
+const save=(k,v)=>{if(k===STORAGE.theme)localStorage.setItem(k,JSON.stringify(v));};
+function clearLegacyData(){
+  for(const key of [STORAGE.prices,STORAGE.weights,STORAGE.productEdits,STORAGE.visits,STORAGE.custom,STORAGE.catalog,STORAGE.selectedProducts]){
+    localStorage.removeItem(key);
+  }
 }
+async function syncFromCloud({refreshCatalog=false}={}){
+  if(!cloudConfigured())return;
+  await cloudLoad();
+  if(refreshCatalog)await cloudRefreshCatalog();
+}
+let prices={}, weights={}, productEdits={}, visits={}, custom={}, catalog=[], selectedProducts={};
 
-// Si la nube está activa, no reinyectamos selecciones locales al arrancar.
-// Supabase manda y el estado local solo sirve como respaldo cuando no hay nube.
+clearLegacyData();
+
+// Catálogo y estado global se cargan únicamente desde Supabase cuando está disponible.
 if(!cloudConfigured()){
+  prices=load(STORAGE.prices,{});
+  weights=load(STORAGE.weights,{});
+  productEdits=load(STORAGE.productEdits,{});
+  visits=load(STORAGE.visits,{});
+  custom=load(STORAGE.custom,{});
+  catalog=load(STORAGE.catalog,[]);
+  selectedProducts=load(STORAGE.selectedProducts,{});
+  if(!Array.isArray(catalog)) catalog=[];
+  PRODUCTOS.forEach(p=>{if(!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:p.pesoBase??''});});
+  Object.values(custom||{}).flat().forEach(p=>{if(p&&!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:''});});
   CLIENTES.forEach(c=>{
     if(!Array.isArray(selectedProducts[c.id])) selectedProducts[c.id]=[];
     const ids=new Set(selectedProducts[c.id]);
@@ -212,7 +215,6 @@ if(!cloudConfigured()){
     (custom[c.id]||[]).forEach(p=>ids.add(p.id));
     selectedProducts[c.id]=[...ids].filter(id=>catalog.some(p=>p.id===id));
   });
-  save(STORAGE.selectedProducts,selectedProducts);
 }
 
 function catalogProducts(){return catalog.map(p=>({...p,nombre:productEdits[p.id]?.nombre||p.nombre,marca:productEdits[p.id]?.marca||p.marca,pesoBase:productEdits[p.id]?.pesoBase??p.pesoBase??''}));}
@@ -296,7 +298,7 @@ function catalogModal(c){
 function newProductModal(){return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Agregar nuevo producto</h3><p class="text-xs text-slate-500">Se guardará en el catálogo global y quedará disponible para todos los clientes.</p></div><button id="closeNewProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="newProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="newProductName" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. Velón especial N°8"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="newProductBrand" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. BIPA"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="newProductWeight" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. 250"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-plus mr-2"></i>Guardar producto</button></form></div></div>`;}
 function editProduct(id){const p=productById(id);if(!p)return;state.editProductId=id;state.newProductOpen=false;render();requestAnimationFrame(()=>$('#editProductName')?.focus());}
 function editProductModal(id){const p=productById(id);if(!p)return '';return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Editar producto</h3><p class="text-xs text-slate-500">El cambio se actualizará en el catálogo global.</p></div><button id="closeEditProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="editProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="editProductName" value="${esc(p.nombre)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="editProductBrand" value="${esc(p.marca)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="editProductWeight" value="${esc(p.pesoBase??'')}" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-floppy-disk mr-2"></i>Guardar cambios</button></form></div></div>`;}
-async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);save(STORAGE.catalog,catalog);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);save(STORAGE.catalog,catalog);toast('No se pudo actualizar el producto en Supabase');return;}await cloudLoad();state.editProductId=null;toast('Producto actualizado para todos los clientes');render();}
+async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);toast('No se pudo actualizar el producto en Supabase');return;}state.editProductId=null;await syncFromCloud();toast('Producto actualizado para todos los clientes');render();}
 async function removeProductFromClient(productId){
   if(!state.selected)return;
   const clientId=state.selected.id;
@@ -309,15 +311,12 @@ async function removeProductFromClient(productId){
   selectedProducts[clientId]=current.filter(pid=>String(pid)!==String(productId));
   if(prices[clientId])delete prices[clientId][productId];
   if(weights[clientId])delete weights[clientId][productId];
-  save(STORAGE.selectedProducts,selectedProducts);
-  save(STORAGE.prices,prices);
-  save(STORAGE.weights,weights);
-  await cloudLoad();
+  await syncFromCloud();
   toast('Producto quitado del cliente');
   render();
 }
-async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}catalog=catalog.filter(x=>x.id!==id);for(const c of CLIENTES){selectedProducts[c.id]=(selectedProducts[c.id]||[]).filter(pid=>pid!==id);if(prices[c.id])delete prices[c.id][id];if(weights[c.id])delete weights[c.id][id];}save(STORAGE.catalog,catalog);save(STORAGE.selectedProducts,selectedProducts);save(STORAGE.prices,prices);save(STORAGE.weights,weights);await cloudLoad();state.productSearch='';toast('Producto eliminado del catálogo global');render();}
-async function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)){selectedProducts[state.selected.id].push(id);save(STORAGE.selectedProducts,selectedProducts);const ok=await cloudSelected(state.selected.id,id);if(ok)await cloudLoad();}state.catalogOpen=false;state.productSearch='';toast('Producto añadido al cliente');render();}
+async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}state.productSearch='';await syncFromCloud();toast('Producto eliminado del catálogo global');render();}
+async function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)){selectedProducts[state.selected.id].push(id);await cloudSelected(state.selected.id,id);}state.catalogOpen=false;state.productSearch='';await syncFromCloud();toast('Producto añadido al cliente');render();}
 async function createNewProduct(){
   const name=$('#newProductName')?.value.trim();
   const marca=$('#newProductBrand')?.value.trim();
@@ -328,10 +327,10 @@ async function createNewProduct(){
   const created=await cloudCatalog(p);
   if(!created){toast('No se pudo crear el producto en Supabase');return;}
   if(created.id){p.dbId=String(created.id);p.id=String(created.id);p.codigo=created.codigo||p.codigo;}
-  catalog=catalog.filter(x=>x.id!==id&&x.codigo!==p.codigo);catalog.push(p);save(STORAGE.catalog,catalog);
+  catalog=catalog.filter(x=>x.id!==id&&x.codigo!==p.codigo);catalog.push(p);
   selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];
-  if(!selectedProducts[state.selected.id].includes(p.id))selectedProducts[state.selected.id].push(p.id);save(STORAGE.selectedProducts,selectedProducts);await cloudSelected(state.selected.id,p.id);
-  await cloudLoad();
+  if(!selectedProducts[state.selected.id].includes(p.id))selectedProducts[state.selected.id].push(p.id);await cloudSelected(state.selected.id,p.id);
+  await syncFromCloud({refreshCatalog:true});
   state.newProductOpen=false;state.catalogOpen=true;state.productSearch='';toast('Producto creado y disponible para todos los clientes');render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());
 }
 
@@ -349,19 +348,19 @@ function render(){const root=$('#app');root.innerHTML=state.view==='home'?home()
 function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;const s=$('#search');if(s){s.oninput=e=>{state.search=e.target.value;render();requestAnimationFrame(()=>{const input=$('#search');if(input){input.focus();input.setSelectionRange(state.search.length,state.search.length);}})}}const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('.statusBtn').forEach(b=>b.onclick=async()=>{
   const cid=state.selected.id, next=b.dataset.status;
   const previous=visits[cid]||'Pendiente';
-  visits[cid]=next;save(STORAGE.visits,visits);render();
+  visits[cid]=next;render();
   const ok=await cloudVisit(cid,next);
-  if(ok)toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');
-  else{visits[cid]=previous;save(STORAGE.visits,visits);toast('ERROR: no se pudo guardar la visita en Supabase');render();}
-});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=async()=>{prices[state.selected.id]=prices[state.selected.id]||{};document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val)});save(STORAGE.prices,prices);await Promise.all(Object.entries(prices[state.selected.id]||{}).map(([pid,val])=>cloudPrice(state.selected.id,pid,val)));await cloudLoad();toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{await cloudRefreshCatalog();state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
+  if(ok){await syncFromCloud();toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');}
+  else{visits[cid]=previous;toast('ERROR: no se pudo guardar la visita en Supabase');render();}
+});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=async()=>{prices[state.selected.id]=prices[state.selected.id]||{};const payload=[];document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val);payload.push(cloudPrice(state.selected.id,i.dataset.price,val===''?'':Number(val)));});await Promise.all(payload);await syncFromCloud();toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{await syncFromCloud({refreshCatalog:true});state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
 
 document.addEventListener('click',e=>{const dash=e.target.closest('#dashboardBtn');if(dash){e.preventDefault();state.view='dashboard';render();}});
 
 document.addEventListener('click',e=>{const card=e.target.closest('[data-client]');if(card){e.preventDefault();const cliente=CLIENTES.find(c=>String(c.id)===String(card.dataset.client));if(cliente){state.selected=cliente;state.view='client';state.productSearch='';state.catalogOpen=false;state.newProductOpen=false;render();}}});
 
-function exportCSV(){const rows=[["Cliente","Marca","Producto","Peso","Precio"]];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);ps.forEach(p=>{rows.push([c.nombre,p.marca,p.nombre,p.pesoBase??"",prices[c.id]?.[p.id]??""])})});const csv="\ufeff"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,"")}"`).join(",")).join("\r\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`bipa_track_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast("CSV exportado");}
+function exportCSV(){const rows=[["Cliente","Marca","Producto","Peso","Precio"]];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);ps.forEach(p=>{rows.push([c.nombre,p.marca,p.nombre,p.pesoBase??"",prices[c.id]?.[p.id]??""])})});const csv="\ufeff"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`bipa_track_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast("CSV exportado");}
 let toastTimer;function toast(msg){clearTimeout(toastTimer);const el=$('#toast');if(!el)return;el.innerHTML=`<div class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-2xl bg-gray-900 text-white shadow-xl flex items-center gap-2 text-sm font-bold"><i class="fa-solid fa-circle-check text-emerald-400"></i>${esc(msg)}</div>`;toastTimer=setTimeout(()=>el.innerHTML='',3000)}
-(function(){if(cloudConfigured()){setTimeout(()=>cloudLoad(),250);cloudTimer=setInterval(()=>cloudLoad(),15000);}})();
+(function(){if(cloudConfigured()){setTimeout(()=>syncFromCloud({refreshCatalog:true}),250);cloudTimer=setInterval(()=>syncFromCloud({refreshCatalog:true}),15000);}})();
 
 (function(){if(localStorage.getItem(STORAGE.theme)==='dark'||(!localStorage.getItem(STORAGE.theme)&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark');render()})();
 </script></body></html>

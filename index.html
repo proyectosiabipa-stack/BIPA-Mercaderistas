@@ -4,7 +4,7 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#2563eb"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><title>BIPA Track</title>
 <script src="https://cdn.tailwindcss.com"></script><script>tailwind.config={darkMode:'class',theme:{extend:{boxShadow:{soft:'0 10px 35px rgba(15,23,42,.08)'}}}}</script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-<style>html,body{min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.safe{padding-bottom:env(safe-area-inset-bottom)}.glass{background:rgba(255,255,255,.76);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}.dark .glass{background:rgba(17,24,39,.78)}.app-card{transition:all .3s}.app-card:active{transform:scale(.985)}.hide-scroll::-webkit-scrollbar{display:none}.hide-scroll{scrollbar-width:none}modal-bg{background:rgba(15,23,42,.55);backdrop-filter:blur(8px)}input[type=number]::-webkit-inner-spin-button{opacity:.5}</style>
+<style>html,body{min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}html{overscroll-behavior-y:none}.safe{padding-bottom:env(safe-area-inset-bottom)}.glass{background:rgba(255,255,255,.76);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}.app-card{transition:border-color .2s,background-color .2s,box-shadow .2s}.hide-scroll::-webkit-scrollbar{display:none}.hide-scroll{scrollbar-width:none}modal-bg{background:rgba(15,23,42,.55);backdrop-filter:blur(8px)}input[type=number]::-webkit-inner-spin-button{opacity:.5}button,input,select{touch-action:manipulation;-webkit-tap-highlight-color:transparent}input,select{font-size:16px}@media(hover:none){.app-card:active,.statusBtn:active{transform:none!important}.hover\\:scale-\\[1\\.02\\]:hover,.hover\\:scale-105:hover{transform:none!important}}</style>
 </head>
 <body class="min-h-full bg-slate-100 text-slate-900 dark:bg-gray-900 dark:text-gray-100 transition-colors duration-300">
 <div id="app"></div>
@@ -22,12 +22,13 @@ const STORAGE={prices:'bipa_prices_v1',weights:'bipa_weights_v1',productEdits:'b
    ============================================================ */
 const CLOUD={
   enabled:true,
-  supabaseUrl:'https://qgmbwvqzlmvzikizjish.supabase.co',
-  supabaseAnonKey:'sb_publishable_3p7AkmtJLMIXj8PO8YCGSg_WVfZD_a6',
-  apiBase:'https://qgmbwvqzlmvzikizjish.supabase.co/rest/v1'
+  supabaseUrl:'https://qnbynijhmdbqgeeuljib.supabase.co',
+  supabaseAnonKey:'sb_publishable_3vF2sycL2edUA9ZTRTLoHA_oua_WkQ8',
+  apiBase:'https://qnbynijhmdbqgeeuljib.supabase.co/rest/v1'
 };
 let cloudReady=false;
 let cloudTimer=null;
+let cloudClientsTableAvailable=true;
 const cloudHeaders=()=>({
   apikey:CLOUD.supabaseAnonKey,
   Authorization:'Bearer '+CLOUD.supabaseAnonKey,
@@ -42,7 +43,20 @@ function clientKey(c){return [normText(c.nombre),normText(c.zona),normText(c.est
 function dbClientId(localId){return clientDbIds.get(String(localId))||localId;}
 function localClientId(dbId){return clientLocalIds.get(String(dbId))||dbId;}
 async function loadClientIdentityMap(){
-  const dbClients=await cloudFetch('clientes','select=id,nombre,zona,estado&order=id.asc');
+  // Los clientes actuales viven en este archivo; la tabla es opcional en el proyecto nuevo.
+  // Si existe, la usamos para vincular IDs. Si no existe, los IDs locales son los IDs remotos.
+  let dbClients=[];
+  if(cloudClientsTableAvailable){
+    try{
+      dbClients=await cloudFetch('clientes','select=id,nombre,zona,estadoGeografico,estado&order=id.asc');
+    }catch(firstError){
+      try{dbClients=await cloudFetch('clientes','select=id,nombre,zona,estado&order=id.asc');}
+      catch(secondError){cloudClientsTableAvailable=false;console.warn('BIPA: tabla clientes no disponible; se usaran los IDs locales',secondError);}
+    }
+  }
+  clientDbIds.clear();
+  clientLocalIds.clear();
+  for(const c of CLIENTES){clientDbIds.set(String(c.id),String(c.id));clientLocalIds.set(String(c.id),String(c.id));}
   const buckets=new Map();
   for(const d of (dbClients||[])){const k=clientKey(d);if(!buckets.has(k))buckets.set(k,[]);buckets.get(k).push(String(d.id));}
   let matched=0;
@@ -89,7 +103,7 @@ async function cloudLoad(){
     // Cuando la nube está activa, esta lista solo refleja lo que realmente existe en Supabase.
     catalog=merged;
 
-    const nextPrices={},nextWeights={},nextSelected={};
+    const nextPrices={},nextWeights={},nextSelected={},nextVisits={};
     for(const r of (dbLinks||[])){
       const pid=localProductIdFromDb(String(r.producto_id));
       const cid=localClientId(r.cliente_id);
@@ -98,15 +112,22 @@ async function cloudLoad(){
       if(!nextSelected[cid].includes(pid))nextSelected[cid].push(pid);
       nextPrices[cid]=nextPrices[cid]||{}; if(r.precio!==null&&r.precio!==undefined)nextPrices[cid][pid]=Number(r.precio);
       nextWeights[cid]=nextWeights[cid]||{}; if(r.peso!==null&&r.peso!==undefined)nextWeights[cid][pid]=Number(r.peso);
+      nextVisits[cid]='Visitado';
     }
     prices=nextPrices;weights=nextWeights;selectedProducts=nextSelected;
 
-    for(const r of (dbVisits||[])){const cid=localClientId(r.cliente_id);if(CLIENTES.some(c=>String(c.id)===String(cid)))visits[cid]=r.visitado?'Visitado':'Pendiente';}
+    for(const r of (dbVisits||[])){
+      const cid=localClientId(r.cliente_id);
+      if(!CLIENTES.some(c=>String(c.id)===String(cid)))continue;
+      if(nextVisits[cid]==='Visitado')continue;
+      nextVisits[cid]=r.visitado?'Visitado':'Pendiente';
+    }
 
-    save(STORAGE.catalog,catalog);save(STORAGE.prices,prices);save(STORAGE.weights,weights);save(STORAGE.visits,visits);save(STORAGE.selectedProducts,selectedProducts);
+    visits=nextVisits;
     cloudReady=true;
     render();
-  }catch(e){console.error('BIPA Supabase:',e);toast('No se pudo sincronizar con Supabase');}
+  }catch(e){console.error('BIPA Supabase:',e);return false;}
+  return true;
 }
 async function cloudSaveClientProduct(clientId,productId,price,weight){
   if(!cloudConfigured())return false;
@@ -148,10 +169,7 @@ async function cloudRefreshCatalog(){
       const old=oldCatalog.find(x=>String(x.dbId||x.id)===String(p.id)||String(x.codigo||'')===String(p.codigo||''));
       merged.push({id:old?.id||String(p.id),dbId:String(p.id),nombre:p.nombre||old?.nombre||'',marca:p.marca||old?.marca||'',codigo:p.codigo||old?.codigo||String(p.id),pesoBase:p.peso??old?.pesoBase??'',precioBase:old?.precioBase??0});
     }
-    // Nunca eliminamos un producto local que todavía esté pendiente de sincronización.
-    for(const p of oldCatalog){if(!merged.some(x=>String(x.dbId||x.id)===String(p.dbId||p.id)||String(x.codigo)===String(p.codigo))){merged.push(p);}}
     catalog=merged;
-    save(STORAGE.catalog,catalog);
     return true;
   }catch(e){console.error('BIPA catálogo global:',e);return false;}
 }
@@ -182,20 +200,41 @@ function cloudProductEdit(productId,value){const p=productById(productId);if(!p)
 
 const state={view:'home',search:'',zone:'ALL',geoState:'ALL',visit:'ALL',brand:'ALL',selected:null,productSearch:'',catalogOpen:false,newProductOpen:false,editProductId:null,dashboardBrand:'ALL',dashboardProduct:'ALL'};
 const $=s=>document.querySelector(s); const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const load=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}}; const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
-let prices=load(STORAGE.prices,{}), weights=load(STORAGE.weights,{}), productEdits=load(STORAGE.productEdits,{}), visits=load(STORAGE.visits,{}), custom=load(STORAGE.custom,{}), catalog=load(STORAGE.catalog,null), selectedProducts=load(STORAGE.selectedProducts,{});
+const save=(k,v)=>{if(k===STORAGE.theme)localStorage.setItem(k,JSON.stringify(v));};
+let cloudSyncInFlight=null;
+let cloudSyncErrorNotified=false;
+async function syncFromCloud({refreshCatalog=false}={}){
+  if(!cloudConfigured())return false;
+  if(cloudSyncInFlight)return cloudSyncInFlight;
+  cloudSyncInFlight=(async()=>{
+    const loaded=await cloudLoad();
+    if(!loaded)throw new Error('No se pudo cargar el estado remoto');
+    if(refreshCatalog&&!await cloudRefreshCatalog())throw new Error('No se pudo cargar el catálogo remoto');
+    cloudSyncErrorNotified=false;
+    return true;
+  })().catch(e=>{
+    console.error('BIPA sincronización:',e);
+    if(!cloudSyncErrorNotified){toast('No se pudo sincronizar con Supabase');cloudSyncErrorNotified=true;}
+    return false;
+  }).finally(()=>{cloudSyncInFlight=null;});
+  return cloudSyncInFlight;
+}
+let prices={}, weights={}, productEdits={}, visits={}, custom={}, catalog=[], selectedProducts={};
 
-// Catálogo único global: los 55 productos originales + cualquier producto nuevo registrado.
-if(!Array.isArray(catalog)) catalog=[];
-const originalIds=new Set(PRODUCTOS.map(p=>p.id));
-PRODUCTOS.forEach(p=>{if(!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:p.pesoBase??''});});
-// Migración de productos personalizados creados en versiones anteriores.
-Object.values(custom||{}).flat().forEach(p=>{if(p&&!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:''});});
-save(STORAGE.catalog,catalog);
-
-// Si la nube está activa, no reinyectamos selecciones locales al arrancar.
-// Supabase manda y el estado local solo sirve como respaldo cuando no hay nube.
+// Catálogo y estado global se cargan únicamente desde Supabase cuando está disponible.
+// El fallback local solo existe si la nube no responde.
 if(!cloudConfigured()){
+  const load=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
+  prices=load(STORAGE.prices,{});
+  weights=load(STORAGE.weights,{});
+  productEdits=load(STORAGE.productEdits,{});
+  visits=load(STORAGE.visits,{});
+  custom=load(STORAGE.custom,{});
+  catalog=load(STORAGE.catalog,[]);
+  selectedProducts=load(STORAGE.selectedProducts,{});
+  if(!Array.isArray(catalog)) catalog=[];
+  PRODUCTOS.forEach(p=>{if(!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:p.pesoBase??''});});
+  Object.values(custom||{}).flat().forEach(p=>{if(p&&!catalog.some(x=>x.id===p.id)) catalog.push({...p,pesoBase:''});});
   CLIENTES.forEach(c=>{
     if(!Array.isArray(selectedProducts[c.id])) selectedProducts[c.id]=[];
     const ids=new Set(selectedProducts[c.id]);
@@ -204,14 +243,13 @@ if(!cloudConfigured()){
     (custom[c.id]||[]).forEach(p=>ids.add(p.id));
     selectedProducts[c.id]=[...ids].filter(id=>catalog.some(p=>p.id===id));
   });
-  save(STORAGE.selectedProducts,selectedProducts);
 }
 
 function catalogProducts(){return catalog.map(p=>({...p,nombre:productEdits[p.id]?.nombre||p.nombre,marca:productEdits[p.id]?.marca||p.marca,pesoBase:productEdits[p.id]?.pesoBase??p.pesoBase??''}));}
 function productById(id){return catalogProducts().find(p=>p.id===id);}
 function clientProducts(id){const ids=Array.isArray(selectedProducts[id])?selectedProducts[id]:[];return ids.map(productById).filter(Boolean);}
-function visitStatus(id){return visits[id]==='Visitado'?'Visitado':'Pendiente'}
-function filteredClients(){const q=state.search.trim().toLowerCase();return CLIENTES.filter(c=>(!q||c.nombre.toLowerCase().includes(q)||c.zona.toLowerCase().includes(q)||c.estadoGeografico.toLowerCase().includes(q))&&(state.zone==='ALL'||c.zona===state.zone)&&(state.geoState==='ALL'||c.estadoGeografico===state.geoState)&&(state.visit==='ALL'||visitStatus(c.id)===state.visit));}
+function visitStatus(id){return visits[id]==='Visitado'||(Array.isArray(selectedProducts[id])&&selectedProducts[id].length>0)?'Visitado':'Pendiente'}
+function filteredClients(){const q=state.search.trim().toLowerCase();return CLIENTES.filter(c=>(!q||c.nombre.toLowerCase().includes(q)||c.zona.toLowerCase().includes(q)||c.estadoGeografico.toLowerCase().includes(q))&&(state.zone==='ALL'||c.zona===state.zone)&&(state.geoState==='ALL'||c.estadoGeografico===state.geoState)&&(state.visit==='ALL'||visitStatus(c.id)===state.visit)).sort((a,b)=>{const av=visitStatus(a.id)==='Visitado'?0:1;const bv=visitStatus(b.id)==='Visitado'?0:1;if(av!==bv)return av-bv;return a.nombre.localeCompare(b.nombre,'es');});}
 function unique(key){return [...new Set(CLIENTES.map(x=>x[key]).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'es'));}
 function stats(){return {total:CLIENTES.length,visited:CLIENTES.filter(c=>visitStatus(c.id)==='Visitado').length,pending:CLIENTES.filter(c=>visitStatus(c.id)==='Pendiente').length,states:new Set(CLIENTES.map(c=>c.estadoGeografico)).size,zones:new Set(CLIENTES.map(c=>c.zona)).size};}
 function dashboardData(){
@@ -241,12 +279,12 @@ function money(v){return Number.isFinite(Number(v))?`$${Number(v).toFixed(2)}`:'
 function home(){const st=stats(),list=filteredClients();return `<div class="min-h-screen max-w-7xl mx-auto p-3 sm:p-5">
 <header class="glass sticky top-0 z-30 rounded-3xl border border-slate-200 dark:border-gray-700 shadow-soft px-4 py-3 mb-5"><div class="flex items-center justify-between gap-3"><div class="flex items-center gap-3"><div class="w-11 h-11 rounded-2xl bg-blue-600 text-white grid place-items-center shadow-lg"><i class="fa-solid fa-store"></i></div><div><div class="font-black">BIPA <span class="text-blue-600">Mercaderistas</span></div><div class="text-xs text-slate-500">Gestión de clientes</div></div></div><div class="flex gap-2"><button id="dashboardBtn" type="button" class="px-4 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 font-black transition-all hover:scale-[1.02]"><i class="fa-solid fa-chart-simple mr-1"></i>Dashboard</button><button id="themeBtn" type="button" class="w-11 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 transition-all hover:scale-105"><i class="fa-solid fa-sun dark:hidden"></i><i class="fa-solid fa-moon hidden dark:inline"></i></button><button id="exportBtn" type="button" class="px-4 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 font-black transition-all hover:scale-[1.02]"><i class="fa-solid fa-file-csv mr-1"></i>Exportar</button></div></div></header>
 <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-5">${[['fa-users','Clientes',st.total,'text-blue-600'],['fa-check','Visitados',st.visited,'text-emerald-600'],['fa-clock','Pendientes',st.pending,'text-amber-500'],['fa-layer-group','Estados',st.states,'text-indigo-600'],['fa-location-dot','Zonas',st.zones,'text-violet-600']].map(x=>`<div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid ${x[0]} ${x[3]}"></i><div class="text-2xl font-black mt-2">${x[2]}</div><div class="text-xs text-slate-500">${x[1]}</div></div>`).join('')}</div>
-<section class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft mb-5"><div class="grid grid-cols-1 md:grid-cols-4 gap-3"><div class="relative"><i class="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i><input id="search" value="${esc(state.search)}" placeholder="Buscar cliente, zona o estado..." class="w-full pl-9 pr-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><select id="zone" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todas las zonas</option>${unique('zona').map(x=>`<option ${state.zone===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select><select id="geoState" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todos los estados</option>${unique('estadoGeografico').map(x=>`<option ${state.geoState===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select><select id="visit" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todas las visitas</option><option value="Pendiente" ${state.visit==='Pendiente'?'selected':''}>Pendientes</option><option value="Visitado" ${state.visit==='Visitado'?'selected':''}>Visitados</option></select></div></section>
+<section class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft mb-5"><div class="grid grid-cols-1 md:grid-cols-4 gap-3"><div class="relative"><i class="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i><input id="search" value="${esc(state.search)}" placeholder="Buscar cliente, zona o estado..." class="w-full pl-9 pr-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">Filtro de visitas</label><select id="visit" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todas las visitas</option><option value="Pendiente" ${state.visit==='Pendiente'?'selected':''}>Pendientes</option><option value="Visitado" ${state.visit==='Visitado'?'selected':''}>Visitados</option></select></div><select id="zone" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todas las zonas</option>${unique('zona').map(x=>`<option ${state.zone===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select><select id="geoState" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todos los estados</option>${unique('estadoGeografico').map(x=>`<option ${state.geoState===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select></div></section>
 <div class="mb-3"><h2 class="text-xl font-black">Clientes</h2><p class="text-xs text-slate-500">${list.length} resultados</p></div><div class="space-y-2">${list.map(c=>`<button type="button" data-client="${c.id}" class="clientCard w-full text-left app-card rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft hover:border-blue-500 transition-all"><div class="flex items-center gap-3"><div class="w-11 h-11 rounded-2xl bg-blue-50 dark:bg-blue-900/30 text-blue-600 grid place-items-center font-black">${esc(c.nombre.charAt(0))}</div><div class="min-w-0 flex-1"><div class="font-black text-sm truncate">${esc(c.nombre)}</div><div class="text-xs text-slate-500 mt-1"><i class="fa-solid fa-location-dot mr-1"></i>${esc(c.zona)} · ${esc(c.estadoGeografico)} <span class="ml-2 px-2 py-1 rounded-full ${visitStatus(c.id)==='Visitado'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}">${visitStatus(c.id)}</span></div></div><i class="fa-solid fa-chevron-right text-slate-400"></i></div></button>`).join('')||`<div class="py-12 text-center text-slate-400">No se encontraron clientes.</div>`}</div><div id="toast"></div></div>`;}
 
 function clientView(c){if(!c)return home();const products=clientProducts(c.id);const q=state.productSearch.trim().toLowerCase();const filtered=products.filter(p=>!q||p.nombre.toLowerCase().includes(q)||p.marca.toLowerCase().includes(q)||p.codigo.toLowerCase().includes(q));
 return `<div class="min-h-screen max-w-5xl mx-auto p-3 sm:p-5"><header class="glass sticky top-0 z-30 rounded-3xl border border-slate-200 dark:border-gray-700 shadow-soft px-4 py-3 mb-5"><div class="flex items-center gap-3"><button id="backBtn" type="button" class="w-11 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700"><i class="fa-solid fa-arrow-left"></i></button><div class="min-w-0 flex-1"><div class="font-black truncate">BIPA <span class="text-blue-600">Mercaderistas</span></div><div class="text-xs text-slate-500 truncate">${esc(c.nombre)}</div></div><button id="themeBtn" type="button" class="w-11 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700"><i class="fa-solid fa-sun dark:hidden"></i><i class="fa-solid fa-moon hidden dark:inline"></i></button></div></header>
-<section class="rounded-3xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white p-5 shadow-lg mb-5"><div class="flex items-start gap-4"><div class="w-14 h-14 rounded-2xl bg-white/15 grid place-items-center text-xl font-black">${esc(c.nombre.charAt(0))}</div><div class="min-w-0 flex-1"><div class="text-xs text-blue-100 mb-1">${esc(c.id)}</div><h1 class="text-xl font-black leading-tight">${esc(c.nombre)}</h1><div class="mt-2 flex flex-wrap gap-2"><span class="px-2.5 py-1 rounded-full bg-white/15 text-xs"><i class="fa-solid fa-location-dot mr-1"></i>${esc(c.zona)}</span><span class="px-2.5 py-1 rounded-full bg-white/15 text-xs">${esc(c.estadoGeografico)}</span></div></div></div><div class="mt-4"><button type="button" data-status="${visitStatus(c.id)==='Visitado'?'Pendiente':'Visitado'}" class="statusBtn w-full py-3.5 rounded-2xl ${visitStatus(c.id)==='Visitado'?'bg-emerald-100 text-emerald-700':'bg-white text-blue-700'} font-black shadow-sm active:scale-[.99] transition-all"><i class="fa-solid ${visitStatus(c.id)==='Visitado'?'fa-rotate-left':'fa-check'} mr-2"></i>${visitStatus(c.id)==='Visitado'?'Destildar visita':'Marcar como visitado'}</button></div></section>
+<section class="rounded-3xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white p-5 shadow-lg mb-5"><div class="flex items-start gap-4"><div class="w-14 h-14 rounded-2xl bg-white/15 grid place-items-center text-xl font-black">${esc(c.nombre.charAt(0))}</div><div class="min-w-0 flex-1"><div class="text-xs text-blue-100 mb-1">${esc(c.id)}</div><h1 class="text-xl font-black leading-tight">${esc(c.nombre)}</h1><div class="mt-2 flex flex-wrap gap-2"><span class="px-2.5 py-1 rounded-full bg-white/15 text-xs"><i class="fa-solid fa-location-dot mr-1"></i>${esc(c.zona)}</span><span class="px-2.5 py-1 rounded-full bg-white/15 text-xs">${esc(c.estadoGeografico)}</span><span class="px-2.5 py-1 rounded-full ${visitStatus(c.id)==='Visitado'?'bg-emerald-400/20 text-emerald-100':'bg-white/15 text-white'} text-xs"><i class="fa-solid ${visitStatus(c.id)==='Visitado'?'fa-circle-check':'fa-clock'} mr-1"></i>${visitStatus(c.id)}</span></div></div></div></section>
 <section class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><div class="mb-4"><h2 class="text-xl font-black">Productos del cliente</h2><p class="text-xs text-slate-500">Este cliente comienza sin productos. Selecciona los que realmente maneja.</p></div><div class="mb-5"><button id="openCatalog" type="button" class="w-full rounded-2xl bg-blue-600 hover:bg-blue-700 text-white py-4 px-4 font-black transition-all"><i class="fa-solid fa-list-check mr-2"></i>Añadir radar</button></div>
 ${products.length?`<div class="flex flex-col sm:flex-row gap-3 mb-4"><div class="relative flex-1"><i class="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i><input id="productSearch" value="${esc(state.productSearch)}" placeholder="Buscar producto del cliente..." class="w-full pl-9 pr-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div class="text-xs text-slate-500 flex items-center px-2">${products.length} seleccionado${products.length===1?'':'s'}</div></div><div class="space-y-2">${filtered.map(p=>{const val=prices[c.id]?.[p.id]??'';const pesoTxt=p.pesoBase!==''&&p.pesoBase!=null?`${esc(p.pesoBase)} g`:'Sin dato';return `<div class="rounded-2xl bg-slate-50 dark:bg-gray-900 px-4 py-3 border border-slate-100 dark:border-gray-700"><div class="flex items-center gap-3"><div class="min-w-0 flex-1 flex items-center gap-3"><div class="min-w-0 flex-1"><div class="font-black text-sm leading-tight truncate">${esc(p.nombre)}</div><div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-400 mt-1"><span>${esc(p.marca)}</span><span>Peso: ${pesoTxt}</span></div></div><div class="shrink-0 flex items-center gap-1"><button type="button" data-edit-product="${p.id}" class="w-8 h-8 rounded-xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 text-slate-500 hover:text-blue-600" title="Editar producto"><i class="fa-solid fa-pen"></i></button><button type="button" data-remove-product="${p.id}" class="w-8 h-8 rounded-xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 text-slate-500 hover:text-red-600" title="Quitar del cliente"><i class="fa-solid fa-xmark"></i></button></div></div><div class="w-36 sm:w-44 shrink-0"><div class="relative"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span><input data-price="${p.id}" value="${esc(val)}" type="number" step="0.01" min="0" placeholder="Precio" class="w-full pl-7 pr-2 py-2.5 rounded-xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 outline-none focus:ring-2 focus:ring-blue-500 font-bold text-right"></div></div></div></div>`}).join('')}</div><button id="savePrices" type="button" class="w-full mt-4 py-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-black shadow-lg transition-all"><i class="fa-solid fa-floppy-disk mr-2"></i>Guardar Registro</button>`:`<div class="rounded-3xl border-2 border-dashed border-slate-200 dark:border-gray-700 py-12 px-5 text-center"><div class="w-16 h-16 rounded-3xl bg-blue-50 dark:bg-blue-900/20 text-blue-600 grid place-items-center mx-auto mb-4"><i class="fa-solid fa-box-open text-2xl"></i></div><h3 class="font-black text-lg">Sin productos registrados</h3><p class="text-sm text-slate-500 mt-1 mb-5">Añade productos desde el catálogo o crea uno nuevo.</p></div>`}</section>
 ${state.catalogOpen?catalogModal(c):''}${state.newProductOpen?newProductModal():''}${state.editProductId?editProductModal(state.editProductId):''}<div id="toast"></div></div>`;}
@@ -288,7 +326,7 @@ function catalogModal(c){
 function newProductModal(){return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Agregar nuevo producto</h3><p class="text-xs text-slate-500">Se guardará en el catálogo global y quedará disponible para todos los clientes.</p></div><button id="closeNewProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="newProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="newProductName" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. Velón especial N°8"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="newProductBrand" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. BIPA"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="newProductWeight" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="Ej. 250"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-plus mr-2"></i>Guardar producto</button></form></div></div>`;}
 function editProduct(id){const p=productById(id);if(!p)return;state.editProductId=id;state.newProductOpen=false;render();requestAnimationFrame(()=>$('#editProductName')?.focus());}
 function editProductModal(id){const p=productById(id);if(!p)return '';return `<div class="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm p-3 sm:p-6 flex items-end sm:items-center justify-center"><div class="w-full max-w-lg rounded-3xl bg-white dark:bg-gray-800 shadow-2xl"><div class="p-4 border-b border-slate-200 dark:border-gray-700 flex items-center gap-3"><div class="min-w-0 flex-1"><h3 class="font-black text-lg">Editar producto</h3><p class="text-xs text-slate-500">El cambio se actualizará en el catálogo global.</p></div><button id="closeEditProduct" type="button" class="w-10 h-10 rounded-xl bg-slate-100 dark:bg-gray-900"><i class="fa-solid fa-xmark"></i></button></div><form id="editProductForm" class="p-4 space-y-4"><div><label class="block text-xs font-bold text-slate-500 mb-1">Nombre del producto</label><input id="editProductName" value="${esc(p.nombre)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Marca</label><input id="editProductBrand" value="${esc(p.marca)}" required class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Peso (g)</label><input id="editProductWeight" value="${esc(p.pesoBase??'')}" type="number" step="0.01" min="0" class="w-full px-3 py-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-blue-500"></div><button type="submit" class="w-full py-4 rounded-2xl bg-blue-600 text-white font-black hover:bg-blue-700 transition-all"><i class="fa-solid fa-floppy-disk mr-2"></i>Guardar cambios</button></form></div></div>`;}
-async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);save(STORAGE.catalog,catalog);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);save(STORAGE.catalog,catalog);toast('No se pudo actualizar el producto en Supabase');return;}state.editProductId=null;toast('Producto actualizado para todos los clientes');render();}
+async function saveProductEdit(){const id=state.editProductId;const p=catalog.find(x=>x.id===id);if(!p)return;const name=$('#editProductName')?.value.trim();const marca=$('#editProductBrand')?.value.trim();const peso=$('#editProductWeight')?.value.trim();if(!name||!marca){toast('Completa nombre y marca');return;}const old={...p};p.nombre=name;p.marca=marca;p.pesoBase=peso===''?'':Number(peso);const ok=await cloudEditProduct(p);if(!ok){Object.assign(p,old);toast('No se pudo actualizar el producto en Supabase');return;}if(!await syncFromCloud()){toast('Producto actualizado, pero no se pudo refrescar la pantalla');return;}state.editProductId=null;toast('Producto actualizado para todos los clientes');render();}
 async function removeProductFromClient(productId){
   if(!state.selected)return;
   const clientId=state.selected.id;
@@ -301,14 +339,24 @@ async function removeProductFromClient(productId){
   selectedProducts[clientId]=current.filter(pid=>String(pid)!==String(productId));
   if(prices[clientId])delete prices[clientId][productId];
   if(weights[clientId])delete weights[clientId][productId];
-  save(STORAGE.selectedProducts,selectedProducts);
-  save(STORAGE.prices,prices);
-  save(STORAGE.weights,weights);
+  await syncFromCloud();
   toast('Producto quitado del cliente');
   render();
 }
-async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}catalog=catalog.filter(x=>x.id!==id);for(const c of CLIENTES){selectedProducts[c.id]=(selectedProducts[c.id]||[]).filter(pid=>pid!==id);if(prices[c.id])delete prices[c.id][id];if(weights[c.id])delete weights[c.id][id];}save(STORAGE.catalog,catalog);save(STORAGE.selectedProducts,selectedProducts);save(STORAGE.prices,prices);save(STORAGE.weights,weights);state.productSearch='';toast('Producto eliminado del catálogo global');render();}
-function addCatalogToClient(id){if(!state.selected)return;selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];if(!selectedProducts[state.selected.id].includes(id)){selectedProducts[state.selected.id].push(id);save(STORAGE.selectedProducts,selectedProducts);cloudSelected(state.selected.id,id);}state.catalogOpen=false;state.productSearch='';toast('Producto añadido al cliente');render();}
+async function deleteProductGlobal(id){const p=productById(id);if(!p)return;if(!confirm(`¿Eliminar "${p.nombre}" del catálogo global? Esto también lo quitará de todos los clientes.`))return;const ok=await cloudDeleteProduct(id);if(!ok){toast('No se pudo eliminar el producto de Supabase');return;}state.productSearch='';if(!await syncFromCloud()){toast('Producto eliminado, pero no se pudo refrescar la pantalla');return;}toast('Producto eliminado del catálogo global');render();}
+async function addCatalogToClient(id){
+  if(!state.selected)return;
+  const clientId=state.selected.id;
+  selectedProducts[clientId]=Array.isArray(selectedProducts[clientId])?selectedProducts[clientId]:[];
+  if(!selectedProducts[clientId].includes(id)&&!await cloudSelected(clientId,id)){toast('No se pudo añadir el producto en Supabase');return;}
+  visits[clientId]='Visitado';
+  await cloudVisit(clientId,'Visitado');
+  state.catalogOpen=false;
+  state.productSearch='';
+  if(!await syncFromCloud()){toast('Producto añadido, pero no se pudo refrescar la pantalla');return;}
+  toast('Producto añadido al cliente');
+  render();
+}
 async function createNewProduct(){
   const name=$('#newProductName')?.value.trim();
   const marca=$('#newProductBrand')?.value.trim();
@@ -319,10 +367,17 @@ async function createNewProduct(){
   const created=await cloudCatalog(p);
   if(!created){toast('No se pudo crear el producto en Supabase');return;}
   if(created.id){p.dbId=String(created.id);p.id=String(created.id);p.codigo=created.codigo||p.codigo;}
-  catalog=catalog.filter(x=>x.id!==id&&x.codigo!==p.codigo);catalog.push(p);save(STORAGE.catalog,catalog);
-  selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];
-  if(!selectedProducts[state.selected.id].includes(p.id))selectedProducts[state.selected.id].push(p.id);save(STORAGE.selectedProducts,selectedProducts);await cloudSelected(state.selected.id,p.id);
-  await cloudRefreshCatalog();
+  await syncFromCloud({refreshCatalog:true});
+  if(state.selected){
+    selectedProducts[state.selected.id]=Array.isArray(selectedProducts[state.selected.id])?selectedProducts[state.selected.id]:[];
+    if(!selectedProducts[state.selected.id].includes(p.id)){
+      selectedProducts[state.selected.id].push(p.id);
+      if(!await cloudSelected(state.selected.id,p.id)){toast('Producto creado, pero no se pudo asociarlo al cliente');return;}
+    }
+    visits[state.selected.id]='Visitado';
+    await cloudVisit(state.selected.id,'Visitado');
+    await syncFromCloud();
+  }
   state.newProductOpen=false;state.catalogOpen=true;state.productSearch='';toast('Producto creado y disponible para todos los clientes');render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());
 }
 
@@ -336,28 +391,48 @@ function dashboard(){
   const products=selP==='ALL'?d.products:d.products.filter(p=>p.product.nombre===selP);
   return `<div class="min-h-screen max-w-7xl mx-auto p-3 sm:p-5"><header class="glass sticky top-0 z-30 rounded-3xl border border-slate-200 dark:border-gray-700 shadow-soft px-4 py-3 mb-5"><div class="flex items-center justify-between gap-3"><div class="flex items-center gap-3"><div class="w-11 h-11 rounded-2xl bg-blue-600 text-white grid place-items-center shadow-lg"><i class="fa-solid fa-chart-simple"></i></div><div><div class="font-black">BIPA <span class="text-blue-600">Track</span></div><div class="text-xs text-slate-500">Dashboard informativo</div></div></div><div class="flex gap-2"><button id="backBtn" type="button" class="px-4 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 font-black"><i class="fa-solid fa-arrow-left mr-1"></i>Volver</button><button id="themeBtn" type="button" class="w-11 h-11 rounded-2xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 transition-all hover:scale-105"><i class="fa-solid fa-sun dark:hidden"></i><i class="fa-solid fa-moon hidden dark:inline"></i></button></div></div></header><div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5"><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-signal text-blue-600"></i><div class="text-2xl font-black mt-2">${d.clientsWithRadar}</div><div class="text-xs text-slate-500">Clientes con radar</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-arrow-down text-emerald-600"></i><div class="text-base font-black mt-2 truncate">${d.brands[0]?esc(d.brands[0].brand):'-'}</div><div class="text-xs text-slate-500">Marca más barata</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-arrow-up text-rose-600"></i><div class="text-base font-black mt-2 truncate">${d.brands.length?esc(d.brands[d.brands.length-1].brand):'-'}</div><div class="text-xs text-slate-500">Marca más cara</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><i class="fa-solid fa-boxes-stacked text-indigo-600"></i><div class="text-2xl font-black mt-2">${d.products.length}</div><div class="text-xs text-slate-500">Productos con precio</div></div></div><section class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft mb-5"><div class="grid grid-cols-1 md:grid-cols-2 gap-3"><div><label class="block text-xs font-bold text-slate-500 mb-1">Comparar marca</label><select id="dashBrand" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todas las marcas</option>${brandOpts.map(x=>`<option ${selB===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select></div><div><label class="block text-xs font-bold text-slate-500 mb-1">Comparar producto</label><select id="dashProduct" class="w-full py-3 px-3 rounded-2xl bg-slate-100 dark:bg-gray-900 outline-none"><option value="ALL">Todos los productos</option>${prodOpts.map(x=>`<option ${selP===x?'selected':''} value="${esc(x)}">${esc(x)}</option>`).join('')}</select></div></div></section><section class="grid lg:grid-cols-2 gap-5"><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><div class="mb-3"><h2 class="text-lg font-black">Marcas comparadas</h2><p class="text-xs text-slate-500">Promedio, mínimo y máximo</p></div><div class="space-y-2">${brands.length?brands.map(b=>`<div class="rounded-2xl border border-slate-200 dark:border-gray-700 p-3"><div class="flex items-center justify-between gap-3 mb-2"><div class="font-bold text-sm truncate">${esc(b.brand)}</div><div class="text-xs text-slate-500">${b.count} registros</div></div><div class="grid grid-cols-3 gap-2 text-xs"><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Promedio</div><div class="font-black">${money(b.avg)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Mín</div><div class="font-black">${money(b.min)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Máx</div><div class="font-black">${money(b.max)}</div></div></div></div>`).join(''):`<div class="py-10 text-center text-slate-400">No hay datos de marcas.</div>`}</div></div><div class="rounded-3xl bg-white dark:bg-gray-800 border border-slate-200 dark:border-gray-700 p-4 shadow-soft"><div class="mb-3"><h2 class="text-lg font-black">Productos comparados</h2><p class="text-xs text-slate-500">Selección filtrable por producto</p></div><div class="space-y-2">${products.length?products.map(p=>`<div class="rounded-2xl border border-slate-200 dark:border-gray-700 p-3"><div class="font-bold text-sm truncate">${esc(p.product.nombre)}</div><div class="text-xs text-slate-500 mb-2">${esc(p.product.marca)} · ${esc(p.product.codigo||'')}</div><div class="grid grid-cols-3 gap-2 text-xs"><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Promedio</div><div class="font-black">${money(p.avg)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Mín</div><div class="font-black">${money(p.min)}</div></div><div class="rounded-xl bg-slate-50 dark:bg-gray-900 p-2"><div class="text-slate-400">Máx</div><div class="font-black">${money(p.max)}</div></div></div></div>`).join(''):`<div class="py-10 text-center text-slate-400">No hay datos de productos.</div>`}</div></div></section><div id="toast"></div></div>`;
 }
-function render(){const root=$('#app');root.innerHTML=state.view==='home'?home():state.view==='dashboard'?dashboard():clientView(state.selected);bind();}
-function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;const s=$('#search');if(s){s.oninput=e=>{state.search=e.target.value;render();requestAnimationFrame(()=>{const input=$('#search');if(input){input.focus();input.setSelectionRange(state.search.length,state.search.length);}})}}const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('.statusBtn').forEach(b=>b.onclick=async()=>{
-  const cid=state.selected.id, next=b.dataset.status;
-  const previous=visits[cid]||'Pendiente';
-  visits[cid]=next;save(STORAGE.visits,visits);render();
-  const ok=await cloudVisit(cid,next);
-  if(ok)toast(next==='Visitado'?'Visita guardada en la nube':'Visita destildada y guardada');
-  else{visits[cid]=previous;save(STORAGE.visits,visits);toast('ERROR: no se pudo guardar la visita en Supabase');render();}
-});document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));const ps=$('#productSearch');if(ps)ps.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#productSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=()=>{prices[state.selected.id]=prices[state.selected.id]||{};document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val)});save(STORAGE.prices,prices);Object.entries(prices[state.selected.id]||{}).forEach(([pid,val])=>cloudPrice(state.selected.id,pid,val));toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{await cloudRefreshCatalog();state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};const cs=$('#catalogSearch');if(cs)cs.oninput=e=>{state.productSearch=e.target.value;render();requestAnimationFrame(()=>{const input=$('#catalogSearch');if(input){input.focus();input.setSelectionRange(state.productSearch.length,state.productSearch.length);}})};document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
+let filterTimer=null;
+function bindFilter(inputId,stateKey){
+  const input=$(inputId);if(!input)return;
+  input.oninput=e=>{
+    state[stateKey]=e.target.value;
+    clearTimeout(filterTimer);
+    filterTimer=setTimeout(()=>{
+      const keepFocus=document.activeElement===input;
+      render();
+      if(keepFocus)requestAnimationFrame(()=>{const next=$(inputId);if(next){next.focus();next.setSelectionRange(state[stateKey].length,state[stateKey].length);}});
+    },120);
+  };
+}
+function render(){
+  const active=document.activeElement;
+  const keep=active&&active.matches('input,select,textarea');
+  const focusId=keep?active.id:'';
+  const priceId=keep&&active.dataset.price!==undefined?active.dataset.price:'';
+  const value=keep?active.value:'';
+  const start=keep&&typeof active.selectionStart==='number'?active.selectionStart:null;
+  const end=keep&&typeof active.selectionEnd==='number'?active.selectionEnd:null;
+  const root=$('#app');root.innerHTML=state.view==='home'?home():state.view==='dashboard'?dashboard():clientView(state.selected);bind();
+  if(keep)requestAnimationFrame(()=>{
+    const next=priceId?[...document.querySelectorAll('[data-price]')].find(x=>x.dataset.price===priceId):focusId?$('#'+focusId):null;
+    if(!next)return;
+    next.focus();
+    if(priceId)next.value=value;
+    if(start!==null&&typeof next.setSelectionRange==='function')next.setSelectionRange(start,end===null?start:end);
+  });
+}
+function bind(){const t=$('#themeBtn');if(t)t.onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem(STORAGE.theme,document.documentElement.classList.contains('dark')?'dark':'light');};const ex=$('#exportBtn');if(ex)ex.onclick=exportCSV;const ex2=$('#exportBtn2');if(ex2)ex2.onclick=exportCSV;bindFilter('#search','search');const z=$('#zone');if(z)z.onchange=e=>{state.zone=e.target.value;render()};const gs=$('#geoState');if(gs)gs.onchange=e=>{state.geoState=e.target.value;render()};const v=$('#visit');if(v)v.onchange=e=>{state.visit=e.target.value;render()};const back=$('#backBtn');if(back)back.onclick=()=>{state.view='home';state.selected=null;state.productSearch='';render()};document.querySelectorAll('[data-edit-product]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editProduct));document.querySelectorAll('[data-remove-product]').forEach(b=>b.onclick=()=>removeProductFromClient(b.dataset.removeProduct));bindFilter('#productSearch','productSearch');const saveBtn=$('#savePrices');if(saveBtn)saveBtn.onclick=async()=>{prices[state.selected.id]=prices[state.selected.id]||{};const payload=[];document.querySelectorAll('[data-price]').forEach(i=>{const val=i.value.trim();if(val==='')delete prices[state.selected.id][i.dataset.price];else prices[state.selected.id][i.dataset.price]=Number(val);payload.push(cloudPrice(state.selected.id,i.dataset.price,val===''?'':Number(val)));});visits[state.selected.id]='Visitado';payload.push(cloudVisit(state.selected.id,'Visitado'));const results=await Promise.all(payload);if(!results.every(Boolean)||!await syncFromCloud()){toast('No se pudo guardar el registro en Supabase');return;}toast('Registro guardado correctamente');};const openC=$('#openCatalog');if(openC)openC.onclick=async()=>{if(!await syncFromCloud({refreshCatalog:true}))return;state.catalogOpen=true;state.newProductOpen=false;state.editProductId=null;state.productSearch='';render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const closeC=$('#closeCatalog');if(closeC)closeC.onclick=()=>{state.catalogOpen=false;state.productSearch='';render()};bindFilter('#catalogSearch','productSearch');document.querySelectorAll('[data-add-catalog]').forEach(b=>b.onclick=()=>addCatalogToClient(b.dataset.addCatalog));document.querySelectorAll('[data-edit-catalog]').forEach(b=>b.onclick=()=>editProduct(b.dataset.editCatalog));document.querySelectorAll('[data-delete-catalog]').forEach(b=>b.onclick=()=>deleteProductGlobal(b.dataset.deleteCatalog));const openN=$('#openNewProduct');if(openN)openN.onclick=()=>{state.newProductOpen=true;state.catalogOpen=true;render();requestAnimationFrame(()=>$('#newProductName')?.focus());};const closeN=$('#closeNewProduct');if(closeN)closeN.onclick=()=>{state.newProductOpen=false;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const form=$('#newProductForm');if(form)form.onsubmit=e=>{e.preventDefault();createNewProduct();};const closeE=$('#closeEditProduct');if(closeE)closeE.onclick=()=>{state.editProductId=null;render();requestAnimationFrame(()=>$('#catalogSearch')?.focus());};const editForm=$('#editProductForm');if(editForm)editForm.onsubmit=e=>{e.preventDefault();saveProductEdit();};}
 
 document.addEventListener('click',e=>{const dash=e.target.closest('#dashboardBtn');if(dash){e.preventDefault();state.view='dashboard';render();}});
 
 document.addEventListener('click',e=>{const card=e.target.closest('[data-client]');if(card){e.preventDefault();const cliente=CLIENTES.find(c=>String(c.id)===String(card.dataset.client));if(cliente){state.selected=cliente;state.view='client';state.productSearch='';state.catalogOpen=false;state.newProductOpen=false;render();}}});
 
-function exportCSV(){const rows=[["Cliente","Marca","Producto","Peso","Precio"]];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);ps.forEach(p=>{rows.push([c.nombre,p.marca,p.nombre,p.pesoBase??"",prices[c.id]?.[p.id]??""])})});const csv="\ufeff"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,"")}"`).join(",")).join("\r\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`bipa_track_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast("CSV exportado");}
+function exportCSV(){const rows=[["Cliente","Marca","Producto","Peso","Precio"]];CLIENTES.forEach(c=>{const ps=clientProducts(c.id);ps.forEach(p=>{rows.push([c.nombre,p.marca,p.nombre,p.pesoBase??"",prices[c.id]?.[p.id]??""])})});const csv="\ufeff"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n");const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`bipa_track_${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);toast("CSV exportado");}
 let toastTimer;function toast(msg){clearTimeout(toastTimer);const el=$('#toast');if(!el)return;el.innerHTML=`<div class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-2xl bg-gray-900 text-white shadow-xl flex items-center gap-2 text-sm font-bold"><i class="fa-solid fa-circle-check text-emerald-400"></i>${esc(msg)}</div>`;toastTimer=setTimeout(()=>el.innerHTML='',3000)}
-(function(){if(cloudConfigured()){setTimeout(()=>cloudLoad(),250);cloudTimer=setInterval(()=>cloudLoad(),15000);}})();
+(function(){if(cloudConfigured()){setTimeout(()=>syncFromCloud({refreshCatalog:true}),250);cloudTimer=setInterval(()=>{if(document.visibilityState==='visible')syncFromCloud({refreshCatalog:true});},15000);}})();
 
 (function(){if(localStorage.getItem(STORAGE.theme)==='dark'||(!localStorage.getItem(STORAGE.theme)&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.classList.add('dark');render()})();
 </script></body></html>
-
-
 
 
 
